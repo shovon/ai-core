@@ -8,6 +8,7 @@ import {
   model,
   pendingToolCalls,
   runToolCall,
+  shape,
   text,
   tool,
   user,
@@ -1069,6 +1070,270 @@ test("a file type Anthropic cannot take is an error, not a silent drop", async (
   const provider = anthropic(client([]), options);
   const audio = user(file("audio/wav", new Uint8Array()));
   await assert.rejects(collect(provider({ messages: [audio] })), /audio\/wav/);
+});
+
+// ── Shapes ──────────────────────────────────────────────────────────────────
+
+// A schema Anthropic takes as it is: closed objects, and no bound it does not enforce.
+const verdict = shape({
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    why: { anyOf: [{ type: "string" }, { type: "null" }] },
+    steps: { type: "array", items: { type: "string" }, minItems: 1 },
+  },
+  required: ["ok", "why", "steps"],
+  additionalProperties: false,
+});
+// The schema Anthropic was sent for a shape, and nothing else of the request.
+const sentFor = async (schema: object) => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("{}")), options);
+  await collect(claude({ messages: [user("go")], shape: { schema } }));
+  return sent[0].output_config.format.schema;
+};
+const strings = { type: "array", items: { type: "string" } };
+
+test("a shape is asked for as Anthropic's output format, and the answer comes back as text to parse", async () => {
+  const sent: any[] = [];
+  const written = '{"ok":true,"why":null,"steps":["look"]}';
+  const inPieces = sse([
+    start,
+    ...speaks(0, written.slice(0, 12), written.slice(12)),
+    ...finish("end_turn"),
+  ]);
+  const claude = anthropic(client(sent, inPieces, says("plain")), options);
+  const messages = [user("Is it safe?")];
+  const before = structuredClone(verdict.schema);
+  const answer = verdict.parse(
+    await text(claude({ messages, shape: verdict })),
+  );
+  assert.deepEqual(answer, { ok: true, why: null, steps: ["look"] });
+  assert.deepEqual(sent[0].output_config, {
+    format: { type: "json_schema", schema: verdict.schema },
+  });
+  // Only the schema is sent: nothing else of the shape, and the shape is as it was.
+  assert.deepEqual(Object.keys(sent[0].output_config.format), [
+    "type",
+    "schema",
+  ]);
+  assert.deepEqual(verdict.schema, before);
+  // With no shape, the request says nothing of a format.
+  await collect(claude({ messages }));
+  assert.equal("output_config" in sent[1], false);
+});
+
+test("a shape shares output_config with the provider's own options, and is used in place of a format set there", async () => {
+  const sent: any[] = [];
+  const elsewhere = {
+    type: "json_schema",
+    schema: { type: "string" },
+  } as const;
+  const claude = anthropic(client(sent, says("{}"), says('""')), {
+    ...options,
+    output_config: { effort: "low", format: elsewhere },
+  });
+  const messages = [user("go")];
+  await collect(claude({ messages, shape: verdict }));
+  assert.deepEqual(sent[0].output_config, {
+    effort: "low",
+    format: { type: "json_schema", schema: verdict.schema },
+  });
+  // Without a shape, the options go out as they were given.
+  await collect(claude({ messages }));
+  assert.deepEqual(sent[1].output_config, { effort: "low", format: elsewhere });
+});
+
+test("a shape's bounds that Anthropic does not enforce are left out and said in the description; the reader still checks them", async () => {
+  const rated = shape({
+    type: "object",
+    properties: {
+      score: { type: "integer", minimum: 1, maximum: 5 },
+      title: {
+        type: "string",
+        description: "A headline.",
+        minLength: 3,
+        maxLength: 60,
+      },
+      tags: {
+        type: "array",
+        items: { type: "string", maxLength: 12 },
+        minItems: 2,
+        maxItems: 4,
+      },
+      some: { ...strings, minItems: 1 },
+      any: { ...strings, minItems: 0 },
+    },
+    required: ["score", "title", "tags", "some", "any"],
+    additionalProperties: false,
+  });
+  const before = structuredClone(rated.schema);
+  assert.deepEqual(await sentFor(rated.schema), {
+    type: "object",
+    properties: {
+      score: {
+        type: "integer",
+        description: "Must be 1 or more. Must be 5 or less.",
+      },
+      title: {
+        type: "string",
+        description:
+          "A headline. Must be 3 or more characters long. Must be 60 or fewer characters long.",
+      },
+      tags: {
+        type: "array",
+        items: {
+          type: "string",
+          description: "Must be 12 or fewer characters long.",
+        },
+        description: "Must have 2 or more items. Must have 4 or fewer items.",
+      },
+      // Requiring a list to be non-empty, or not, is the one bound Anthropic enforces.
+      some: { ...strings, minItems: 1 },
+      any: { ...strings, minItems: 0 },
+    },
+    required: ["score", "title", "tags", "some", "any"],
+    additionalProperties: false,
+  });
+  assert.deepEqual(rated.schema, before);
+  // The same schema is sent the same way every time.
+  assert.deepEqual(await sentFor(rated.schema), await sentFor(rated.schema));
+  // What Anthropic was not held to, parse() holds the answer to.
+  const outOfBounds = {
+    score: 9,
+    title: "ok",
+    tags: ["a", "b"],
+    some: ["x"],
+    any: [],
+  };
+  assert.throws(
+    () => rated.parse(JSON.stringify(outOfBounds)),
+    /^Error: answer\.score must be 5 or less; answer\.title must be 3 or more characters long$/,
+  );
+});
+
+test("a shape's objects are closed for Anthropic, at every depth, and a schema that already fits goes out as it is", async () => {
+  const lat = { lat: { type: "number" } };
+  const id = { id: { type: "string" } };
+  const n = { n: { type: "integer" } };
+  assert.deepEqual(
+    await sentFor({
+      type: "object",
+      properties: {
+        where: { type: "object", properties: lat, additionalProperties: true },
+        rows: { type: "array", items: { properties: id } },
+        either: {
+          anyOf: [{ type: "null" }, { type: "object", properties: n }],
+        },
+        nothing: { type: "object", additionalProperties: false },
+      },
+    }),
+    {
+      type: "object",
+      properties: {
+        where: { type: "object", properties: lat, additionalProperties: false },
+        rows: {
+          type: "array",
+          items: { properties: id, additionalProperties: false },
+        },
+        either: {
+          anyOf: [
+            { type: "null" },
+            { type: "object", properties: n, additionalProperties: false },
+          ],
+        },
+        // Closed with nothing listed asks for exactly {}, which Anthropic can give.
+        nothing: { type: "object", additionalProperties: false },
+      },
+      additionalProperties: false,
+    },
+  );
+  assert.deepEqual(await sentFor(verdict.schema), verdict.schema);
+  assert.deepEqual(await sentFor({ type: "string" }), { type: "string" });
+});
+
+test("a shape holding an open object with no listed properties is refused, saying where, and nothing is sent", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("{}")), options);
+  const asking = (schema: object) =>
+    collect(claude({ messages: [user("go")], shape: { schema } }));
+  await assert.rejects(
+    asking({ type: "object" }),
+    /^Error: anthropic: cannot ask for an object with no listed properties \(the whole answer\)$/,
+  );
+  await assert.rejects(
+    asking({
+      type: "object",
+      properties: {
+        rows: { type: "array", items: { type: "object", properties: {} } },
+      },
+    }),
+    /no listed properties \(rows\[\]\)/,
+  );
+  await assert.rejects(
+    asking({
+      type: "object",
+      properties: { extra: { type: "object", additionalProperties: true } },
+    }),
+    /no listed properties \(extra\)/,
+  );
+  assert.equal(sent.length, 0);
+});
+
+test("a shaped answer that was cut off ends as any other turn does: it is the reader that refuses it", async () => {
+  const cutOff = sse([
+    start,
+    ...speaks(0, '{"ok":tr'),
+    ...finish("max_tokens"),
+  ]);
+  const claude = anthropic(client([], cutOff, cutOff), options);
+  const request = { messages: [user("Is it safe?")], shape: verdict };
+  const [turn] = await collect(claude(request));
+  assert.ok(turn?.from === "model" && turn.end === "length");
+  assert.deepEqual(turn.content, [{ type: "text", text: '{"ok":tr' }]);
+  await assert.rejects(text(claude(request)), /model stopped early: length/);
+});
+
+test("a shape and tools go in one request: the tools are called first, and the final answer is the JSON", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(
+      sent,
+      thinksThenCalls,
+      says('{"ok":false,"why":"18C","steps":["ask"]}'),
+    ),
+    options,
+  );
+  const messages: AnthropicMessage[] = [user("Is it warm?")];
+  for (;;) {
+    messages.push(
+      ...(await collect(
+        claude({ messages, tools: [weather], shape: verdict }),
+      )),
+    );
+    const calls = pendingToolCalls(messages);
+    if (calls.length === 0) break;
+    messages.push({
+      from: "tool",
+      content: await Promise.all(
+        calls.map((call) => runToolCall([weather], call)),
+      ),
+    });
+  }
+  assert.deepEqual(
+    sent.map((body) => [body.tools.length, body.output_config.format.type]),
+    [
+      [1, "json_schema"],
+      [1, "json_schema"],
+    ],
+  );
+  const last = messages.at(-1);
+  assert.ok(last?.from === "model" && last.content[0]?.type === "text");
+  assert.deepEqual(verdict.parse(last.content[0].text), {
+    ok: false,
+    why: "18C",
+    steps: ["ask"],
+  });
 });
 
 // Must not compile: a provider-specific part with no provider name on it.
