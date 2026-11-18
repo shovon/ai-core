@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+
+# API keys
+.env
+
+# Vite and Electron Forge output
+.vite/
+out/
+
+# Storybook
+storybook-static/
+*storybook.log

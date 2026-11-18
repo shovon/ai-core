@@ -1,0 +1,15 @@
+{
+  // Vite does the building; tsc only checks. The library is imported as
+  // source, so its `.ts` imports have to be allowed here too.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", ".storybook", "forge.env.d.ts", "forge.config.ts", "*.mts"]
+}

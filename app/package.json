@@ -1,0 +1,53 @@
+{
+  "name": "ai-agent-library-app",
+  "productName": "Agent Library",
+  "version": "0.1.0",
+  "description": "An app built on the library, to find out what the library is good for.",
+  "main": ".vite/build/main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "lint": "eslint .",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^8.0.1",
+    "@electron-forge/plugin-vite": "^8.0.1",
+    "@eslint/js": "^10.0.1",
+    "@storybook/addon-a11y": "^10.6.7",
+    "@storybook/addon-docs": "^10.6.7",
+    "@storybook/addon-mcp": "^10.6.7",
+    "@storybook/react-vite": "^10.6.7",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "44.11.3",
+    "eslint": "^10.15.0",
+    "eslint-plugin-import-x": "^4.18.1",
+    "eslint-plugin-storybook": "^10.6.7",
+    "storybook": "^10.6.7",
+    "tailwindcss": "^4.3.5",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^8.3.7"
+  },
+  "dependencies": {
+    "@ai-agent-library/library": "*",
+    "@ai-agent-library/providers": "*",
+    "@ai-agent-library/tree": "*",
+    "@anthropic-ai/sdk": "^1.8.0",
+    "katex": "^0.16.47",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  }
+}

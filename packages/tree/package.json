@@ -1,0 +1,17 @@
+{
+  "name": "@ai-agent-library/tree",
+  "version": "0.1.0",
+  "description": "A tree as plain data: nodes that name their parent, so a history is a path and a fork is a second child.",
+  "private": true,
+  "type": "module",
+  "main": "./tree.ts",
+  "exports": "./tree.ts",
+  "scripts": {
+    "test": "node --test \"*.test.mts\"",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
