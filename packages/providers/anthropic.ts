@@ -2,6 +2,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   answerToolCalls,
+  fitSchema,
   fitToolIds,
   toolResult,
   type FilePart,
@@ -11,6 +12,7 @@ import {
   type Reason,
   type ReasoningPart,
   type Request,
+  type ShapeSpec,
   type Takes,
   type TextPart,
   type ToolCall,
@@ -221,6 +223,94 @@ const unrun = (call: ToolCall) =>
     error: true,
   });
 
+// ── A shape, as Anthropic takes it ──────────────────────────────────────────
+//
+// Anthropic compiles the schema and holds the model to it, but takes a
+// narrower schema than the library does. The rules are from its structured
+// outputs guide. Two limits there are left to the API to report: 24 optional
+// properties and 16 properties with alternatives in one request.
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+// The bounds Anthropic does not enforce, each with what the model is told in its place.
+const bounds: Record<string, (limit: unknown) => string> = {
+  minimum: (limit) => `Must be ${limit} or more.`,
+  maximum: (limit) => `Must be ${limit} or less.`,
+  minLength: (limit) => `Must be ${limit} or more characters long.`,
+  maxLength: (limit) => `Must be ${limit} or fewer characters long.`,
+  minItems: (limit) => `Must have ${limit} or more items.`,
+  maxItems: (limit) => `Must have ${limit} or fewer items.`,
+};
+// The one exception: a list may be required to be non-empty.
+const enforced = (keyword: string, limit: unknown) =>
+  keyword === "minItems" && (limit === 0 || limit === 1);
+
+/**
+ * One schema as Anthropic takes it. A bound it does not enforce is left out
+ * and said in the description, so the model is still told; the reader checks
+ * it. An object is closed, which Anthropic requires: the model then writes
+ * only the listed properties, all of which the schema as given accepts.
+ *
+ * An open object with no listed properties is refused. Anthropic could only
+ * answer `{}` for it, which is not what a schema for any object asks for.
+ *
+ * Whether Anthropic accepts a schema whose whole is not an object is not
+ * documented and has not been checked against the live API; one is sent as is.
+ */
+const fitted = (schema: Record<string, unknown>, at: string): object => {
+  const dropped = Object.keys(bounds).filter(
+    (keyword) =>
+      Object.hasOwn(schema, keyword) && !enforced(keyword, schema[keyword]),
+  );
+  const { properties, description } = schema;
+  const isObject = schema.type === "object" || isRecord(properties);
+  const closed = schema.additionalProperties === false;
+  if (isObject && !closed) {
+    const listed = isRecord(properties) && Object.keys(properties).length > 0;
+    if (!listed)
+      throw new Error(
+        `anthropic: cannot ask for an object with no listed properties (${at || "the whole answer"})`,
+      );
+  }
+  if (dropped.length === 0 && (!isObject || closed)) return schema;
+  const kept = Object.fromEntries(
+    Object.entries(schema).filter(([keyword]) => !dropped.includes(keyword)),
+  );
+  const told = [
+    ...(typeof description === "string" ? [description] : []),
+    ...dropped.map((keyword) => bounds[keyword]!(schema[keyword])),
+  ];
+  return {
+    ...kept,
+    ...(dropped.length > 0 && { description: told.join(" ") }),
+    ...(isObject && { additionalProperties: false }),
+  };
+};
+
+/**
+ * The provider's own `output_config`, with the shape a request asks for put in
+ * as its format. The two share one object: the options may set `effort` there.
+ * A shape on the request is used in place of a format in the options.
+ */
+const outputConfig = (
+  config: Options["output_config"],
+  shape: ShapeSpec | undefined,
+): Options["output_config"] =>
+  shape
+    ? {
+        ...config,
+        // Built from the schema alone: the shape itself is never forwarded.
+        format: {
+          type: "json_schema",
+          schema: fitSchema(
+            shape.schema,
+            fitted,
+          ) as Anthropic.JSONOutputFormat["schema"],
+        },
+      }
+    : config;
+
 // Every stop reason the SDK knows, by name. When the SDK gains one, this stops
 // compiling until it is given a meaning. One the SDK does not know yet arrives
 // as "unknown", never as "stop".
@@ -254,10 +344,11 @@ export const anthropic = (
   client: Anthropic,
   options: Options,
 ): Takes<AnthropicRequest, AnthropicOut> =>
-  async function* ({ system, messages, tools, signal }) {
+  async function* ({ system, messages, tools, shape, signal }) {
     const stream = client.messages.stream(
       {
         ...options,
+        output_config: outputConfig(options.output_config, shape),
         system: instructions(system),
         // Anthropic has no empty turn; one can be left after foreign parts are dropped.
         messages: fitToolIds(

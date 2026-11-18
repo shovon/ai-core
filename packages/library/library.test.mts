@@ -7,6 +7,7 @@ import {
   collect,
   toolFailure,
   file,
+  fitSchema,
   fitToolIds,
   isReasoning,
   isText,
@@ -14,6 +15,7 @@ import {
   pendingToolCalls,
   toolResult,
   runToolCall,
+  shape,
   text,
   tool,
   totalUsage,
@@ -952,6 +954,216 @@ test("answerToolCalls() returns the very same history when every call is answere
   assert.equal(answerToolCalls(stray, unrun), stray);
 });
 
+// The shape of an answer: a field that may be missing is required and either itself or null.
+const triage = shape({
+  type: "object",
+  properties: {
+    category: { enum: ["billing", "bug", "other"] },
+    urgent: { type: "boolean" },
+    orderId: { anyOf: [{ type: "string" }, { type: "null" }] },
+  },
+  required: ["category", "urgent", "orderId"],
+  additionalProperties: false,
+});
+const threw = (run: () => unknown) => {
+  try {
+    run();
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return undefined;
+};
+
+test("shape(): a request asks for it as plain data, and parse() reads the answer as text", async () => {
+  const written = '{"category":"bug","urgent":true,"orderId":null}';
+  const provider = scripted<TextPart>([
+    say(written.slice(0, 9)),
+    say(written.slice(9)),
+    stop,
+  ]);
+  const ticket = triage.parse(
+    await text(provider({ messages: [user("It crashes.")], shape: triage })),
+  );
+  assert.deepEqual(ticket, { category: "bug", urgent: true, orderId: null });
+  // A provider that knows nothing of shapes was simply handed one more field.
+  assert.equal(provider.seen[0]!.shape, triage);
+  // The schema is the one that was given, untouched, and a request needs nothing but it.
+  const schema = { type: "string" };
+  assert.equal(shape(schema).schema, schema);
+  assert.equal(
+    await text(
+      scripted([say('"hi"'), stop])({ messages: [], shape: { schema } }),
+    ),
+    '"hi"',
+  );
+  // The answer is ordinary text in the history, so a stored one reads the same way.
+  const [turn] = JSON.parse(
+    JSON.stringify(
+      await collect(scripted([say(written), stop])({ messages: [] })),
+    ),
+  );
+  assert.deepEqual(triage.parse(turn.content[0].text), ticket);
+});
+
+test("shape(): parse() throws unless the answer is JSON that fits, naming everything wrong", () => {
+  assert.equal(
+    threw(() => triage.parse("Sure! Here is the ticket.")),
+    "the answer is not JSON",
+  );
+  assert.equal(
+    threw(() => triage.parse('{"category":"bug","urg')),
+    "the answer is not JSON",
+  );
+  assert.equal(
+    threw(() => triage.parse('"bug"')),
+    "answer must be an object",
+  );
+  assert.equal(
+    threw(() =>
+      triage.parse('{"category":"Bug","urgent":"yes","note":"x","orderId":7}'),
+    ),
+    [
+      'answer.category must be "billing" or "bug" or "other"',
+      "answer.urgent must be a boolean",
+      "answer.orderId must be a string, or answer.orderId must be null",
+      "answer.note is not expected",
+    ].join("; "),
+  );
+  assert.equal(
+    threw(() => triage.parse('{"category":"bug","urgent":true}')),
+    "answer.orderId is missing",
+  );
+  const counts = shape({ type: "array", items: { type: "integer" } });
+  assert.equal(
+    threw(() => counts.parse("[1,2.5]")),
+    "answer[1] must be an integer",
+  );
+});
+
+test("shape(): parse() is exact about null: where the schema does not accept one, it is wrong", () => {
+  const loose = shape({
+    type: "object",
+    properties: { note: { type: "string" } },
+  });
+  assert.deepEqual(loose.parse("{}"), {});
+  assert.deepEqual(loose.parse('{"note":"x"}'), { note: "x" });
+  // Left out is not the same as null: an optional property is either absent or what its schema says.
+  assert.equal(
+    threw(() => loose.parse('{"note":null}')),
+    "answer.note must be a string",
+  );
+});
+
+test("shape(): a schema that says something unenforced is refused when the shape is made", () => {
+  assert.throws(
+    () => shape({ type: "string", pattern: "^a" }),
+    /"pattern" is not one this enforces/,
+  );
+  assert.throws(
+    () => shape({ type: "object", properties: { when: { format: "date" } } }),
+    /"format"/,
+  );
+});
+
+// Every schema a walk visited, in order, as the place it sits and the keywords it holds.
+const visits = (schema: object) => {
+  const seen: string[] = [];
+  fitSchema(schema, (node, at) => {
+    seen.push(`${at || "(whole)"}: ${Object.keys(node).join(",")}`);
+    return node;
+  });
+  return seen;
+};
+
+test("fitSchema() takes every schema inside a schema through fit, innermost first, and says where each sits", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      name: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+      where: {
+        anyOf: [
+          { type: "null" },
+          { type: "object", properties: { lat: { type: "number" } } },
+        ],
+      },
+      rows: { type: "array", items: { type: "array", items: { enum: [1] } } },
+    },
+    required: ["name"],
+  };
+  assert.deepEqual(visits(schema), [
+    "name: type",
+    "tags[]: type",
+    "tags: type,items",
+    "where: type",
+    "where.lat: type",
+    "where: type,properties",
+    "where: anyOf",
+    "rows[][]: enum",
+    "rows[]: type,items",
+    "rows: type,items",
+    "(whole): type,properties,required",
+  ]);
+});
+
+test("fitSchema() copies only what changed, and returns the very same schema when nothing did", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      name: { type: "string", maxLength: 5 },
+      tags: { type: "array", items: { type: "string" } },
+    },
+    required: ["name"],
+  };
+  const before = structuredClone(schema);
+  assert.equal(
+    fitSchema(schema, (node) => node),
+    schema,
+  );
+  // Fit sees its children already fitted, and what it gives back takes the schema's place.
+  const fitted = fitSchema(schema, (node) => {
+    if (!("maxLength" in node)) return node;
+    const { maxLength, ...kept } = node;
+    return { ...kept, description: `At most ${maxLength}.` };
+  });
+  assert.deepEqual(fitted, {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "At most 5." },
+      tags: { type: "array", items: { type: "string" } },
+    },
+    required: ["name"],
+  });
+  // The untouched branch is the same object, keywords keep their order, and the schema given is as it was.
+  assert.equal(fitted.properties.tags, schema.properties.tags);
+  assert.deepEqual(Object.keys(fitted), ["type", "properties", "required"]);
+  assert.deepEqual(schema, before);
+});
+
+test("fitSchema() refuses by letting fit throw, and leaves alone what is not a schema", () => {
+  const map = { type: "object", properties: { extra: { type: "object" } } };
+  assert.throws(
+    () =>
+      fitSchema(map, (node, at) => {
+        if (node.type === "object" && !("properties" in node))
+          throw new Error(`cannot ask for a free-form object (${at})`);
+        return node;
+      }),
+    /free-form object \(extra\)/,
+  );
+  // As a schema written by hand might be: fit is only ever handed an object.
+  const odd = { items: true, properties: [1], anyOf: ["x", { type: "null" }] };
+  assert.deepEqual(visits(odd), [
+    "(whole): type",
+    "(whole): items,properties,anyOf",
+  ]);
+  const list: object = [1, 2];
+  assert.equal(
+    fitSchema(list, () => ({})),
+    list,
+  );
+});
+
 // What a schema gives `run`, as the compiler sees it. `npm run typecheck` fails if one of these types is off.
 type Same<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
@@ -1004,6 +1216,17 @@ export const typed = () => {
       return String(same) + String(wrong);
     },
   });
+  // A shape types what parse() returns, the way a tool's schema types its input.
+  const ticket = triage.parse("");
+  type Ticket = {
+    category: "billing" | "bug" | "other";
+    urgent: boolean;
+    orderId: string | null;
+  };
+  const sameTicket: Same<typeof ticket, Ticket> = true;
+  // @ts-expect-error a boolean is not a string
+  const wrongTicket: string = ticket.urgent;
+  String(sameTicket) + wrongTicket;
   // A schema whose literal types were lost types nothing: the input is unknown, never a wrong guess.
   const widened = {
     type: "object",

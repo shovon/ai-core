@@ -115,6 +115,8 @@ export type Reply<Out extends Part> = readonly (
 )[];
 
 export type ToolSpec = { name: string; description: string; schema: object };
+/** What an answer must be: JSON that fits this schema. `shape()` makes one that also reads the answer. */
+export type ShapeSpec = { schema: object };
 export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
   /**
    * Standing instructions for this call: one string, or text parts in order.
@@ -126,6 +128,12 @@ export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
   messages: readonly M[];
   /** What the model may call. An empty list means the same as leaving it out: the model can call nothing. */
   tools?: readonly ToolSpec[];
+  /**
+   * Asks for the final answer as JSON that fits a schema. The answer still
+   * arrives as text, for `shape().parse` to read. A provider that cannot ask
+   * for this schema throws; one that does not know the field ignores it.
+   */
+  shape?: ShapeSpec;
   /** Cancels the call. The stream then throws. Give the same signal to `runToolCall()` to cancel running tools. */
   signal?: AbortSignal;
 };
@@ -153,6 +161,14 @@ export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
 // off, or stopped, or the call was simply not run. A provider that needs every
 // call answered gives such a call a result on the way out (answerToolCalls). The
 // history keeps what happened.
+//
+// A request may ask for the answer in a shape. Each API takes a schema in its
+// own dialect, so a provider fits the schema on the way out (fitSchema). It may
+// send a looser one, dropping a bound its API cannot enforce and saying it in
+// the description instead, or a tighter one, closing an object its API needs
+// closed. It never sends one whose answers would have to be rewritten on the
+// way back: what is read is what the model wrote, checked against the schema
+// as it was given. A schema it cannot fit that way, it refuses by throwing.
 
 /** Anything with a provider's shape, whatever request it takes. */
 export type Takes<R, Out extends Part> = (
@@ -468,11 +484,13 @@ export type Tool = ToolSpec & {
   run: (input: unknown, context: ToolContext) => Output | Promise<Output>;
 };
 
-// ── Schemas: one description of a tool's input ──────────────────────────────
+// ── Schemas: one description of a tool's input, or of an answer ─────────────
 //
 // A tool's schema is JSON Schema, because that is what a model is told. The
 // same schema gives `run` its input type (Infer) and is enforced before `run`
-// is called (tool), so the three cannot disagree. They read one subset:
+// is called (tool), so the three cannot disagree. An answer's schema works the
+// same way (shape): told to the model, typing what `parse` returns, enforced
+// by `parse`. They read one subset:
 //
 //   type (a single name), properties, required, additionalProperties (true or
 //   false), items, enum and const (of strings, numbers, booleans and null),
@@ -481,9 +499,9 @@ export type Tool = ToolSpec & {
 // A keyword constrains only the kind of value it is about, as JSON Schema
 // says: `minLength` says nothing of a number. description, title, default,
 // examples, $schema and $comment are for the reader and assert nothing. Any
-// other keyword is refused when the tool is made, because the model would be
-// told something that is never enforced. A tool that needs more is a `Tool`
-// written out, with a `run` that checks its own input.
+// other keyword is refused when the tool or shape is made, because the model
+// would be told something that is never enforced. A tool that needs more is a
+// `Tool` written out, with a `run` that checks its own input.
 
 type Needed<S> = S extends { required: readonly (infer K)[] } ? K : never;
 type Flat<T> = { [K in keyof T]: T[K] };
@@ -542,7 +560,7 @@ const isPlain = (value: unknown) =>
 const named = (at: string) => at || "input";
 const within = (at: string, key: string) => (at ? `${at}.${key}` : key);
 const malformed = (keyword: string, wants: string) =>
-  new Error(`tool: the schema keyword "${keyword}" must be ${wants}`);
+  new Error(`schema: the keyword "${keyword}" must be ${wants}`);
 
 const kinds: Record<
   string,
@@ -716,7 +734,7 @@ const notes = new Set([
 
 /** The check a schema stands for. Throws if the schema says anything that would go unenforced. */
 const checker = (schema: unknown): Check => {
-  if (!isRecord(schema)) throw new Error("tool: a schema must be an object");
+  if (!isRecord(schema)) throw new Error("schema: a schema must be an object");
   const checks = Object.entries(schema)
     .filter(([keyword]) => !notes.has(keyword))
     .map(([keyword, given]) => {
@@ -725,7 +743,7 @@ const checker = (schema: unknown): Check => {
         : undefined;
       if (!make)
         throw new Error(
-          `tool: the schema keyword "${keyword}" is not one this enforces`,
+          `schema: the keyword "${keyword}" is not one this enforces`,
         );
       return make(given, schema);
     });
@@ -758,6 +776,105 @@ export const tool = <const S extends object>(spec: {
       return spec.run(input as Infer<S>, context);
     },
   };
+};
+
+/** A shape that also reads the answer it asked for. */
+export type Shape<T> = ShapeSpec & { parse: (answer: string) => T };
+
+/**
+ * The shape of an answer: one schema that is told to the model, types what
+ * `parse` returns, and is enforced by `parse`. Give it to a request as `shape`
+ * and read the reply with `parse(await text(...))`.
+ *
+ * `parse` throws unless the answer is JSON that fits the schema as it was
+ * given, naming everything wrong with it. It is exact: a `null` where the
+ * schema does not accept one is wrong, so a value that may be missing is best
+ * written as required and either itself or null.
+ *
+ * Throws, when the shape is made, if the schema uses a keyword that would not
+ * be enforced.
+ */
+export const shape = <const S extends object>(schema: S): Shape<Infer<S>> => {
+  const check = checker(schema);
+  return {
+    schema,
+    parse: (answer) => {
+      let value: unknown;
+      try {
+        value = JSON.parse(answer);
+      } catch (cause) {
+        throw new Error("the answer is not JSON", { cause });
+      }
+      const wrong = check(value, "answer");
+      if (wrong.length > 0) throw new Error(wrong.join("; "));
+      // Checked just above: the one place the schema's type is taken on trust.
+      return value as Infer<S>;
+    },
+  };
+};
+
+// ── For provider authors: a schema as one API takes it ─────────────────────
+
+// A copy with every value through `to`; the same list or record back if none changed.
+const mapList = (
+  list: readonly unknown[],
+  to: (item: unknown) => unknown,
+): readonly unknown[] => {
+  const mapped = list.map(to);
+  return mapped.every((item, i) => item === list[i]) ? list : mapped;
+};
+const mapRecord = (
+  record: Record<string, unknown>,
+  to: (value: unknown, key: string) => unknown,
+): Record<string, unknown> => {
+  const mapped = Object.entries(record).map(
+    ([key, value]) => [key, to(value, key)] as const,
+  );
+  return mapped.every(([key, value]) => value === record[key])
+    ? record
+    : Object.fromEntries(mapped);
+};
+
+/**
+ * A copy of the schema in which every schema inside it, innermost first, has
+ * been through `fit`: each property's, an array's items, each alternative of
+ * an `anyOf`, and last the schema itself. Where `fit` gives back the schema it
+ * was handed, nothing is copied, and a schema that needs no change is returned
+ * as is.
+ *
+ * `at` is where the value a schema describes sits: "" for the whole of it,
+ * `a.b` for a property, `a[]` for an array's items. An alternative sits where
+ * its `anyOf` does.
+ *
+ * `fit` may loosen or tighten what a schema accepts. It must not give back one
+ * whose values would have to be rewritten to fit the original; it throws
+ * instead. It must give the same output for the same schema every time.
+ */
+export const fitSchema = (
+  schema: object,
+  fit: (schema: Record<string, unknown>, at: string) => object,
+): object => {
+  const inside = (child: unknown, at: string): unknown =>
+    isRecord(child) ? fitted(child, at) : child;
+  const fitted = (node: Record<string, unknown>, at: string): object => {
+    const { properties, items, anyOf } = node;
+    const inner: Record<string, unknown> = {
+      ...(isRecord(properties) && {
+        properties: mapRecord(properties, (child, key) =>
+          inside(child, within(at, key)),
+        ),
+      }),
+      ...(isRecord(items) && { items: inside(items, `${at}[]`) }),
+      ...(Array.isArray(anyOf) && {
+        anyOf: mapList(anyOf, (child) => inside(child, at)),
+      }),
+    };
+    const unchanged = Object.keys(inner).every(
+      (keyword) => inner[keyword] === node[keyword],
+    );
+    return fit(unchanged ? node : { ...node, ...inner }, at);
+  };
+  return isRecord(schema) ? fitted(schema, "") : schema;
 };
 
 /** The tool calls a history is waiting on: those in a final, finished model turn. */

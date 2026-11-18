@@ -189,6 +189,49 @@ const watched = async (call: ToolCall) => {
 };
 ```
 
+## Ask for a typed answer
+
+A shape is a JSON Schema for the answer. The one schema is told to the model, types what `parse` returns, and is checked by `parse`.
+
+```ts
+import { shape, text, user } from "@ai-agent-library/library";
+
+const triage = shape({
+  type: "object",
+  properties: {
+    category: { enum: ["billing", "bug", "other"] },
+    urgent: { type: "boolean" },
+    orderId: { anyOf: [{ type: "string" }, { type: "null" }] },
+  },
+  required: ["category", "urgent", "orderId"],
+  additionalProperties: false,
+});
+
+const ticket = triage.parse(
+  await text(provider({ system: "Triage the support ticket.", messages: [user(email)], shape: triage })),
+);
+// ticket: { category: "billing" | "bug" | "other"; urgent: boolean; orderId: string | null }
+```
+
+- The answer is ordinary text that happens to be JSON. It streams, ends and is stored like any other answer, so `parse` reads one from a stored history just as well.
+- `parse` throws unless the text is JSON that fits the schema as you wrote it, and the error names everything wrong. Sending that back to the model and asking again is your loop.
+- `parse` is exact about `null`: where the schema does not accept one, it is wrong.
+- The schema uses the same keywords as a tool's. Any other keyword that asserts something is refused when the shape is made.
+- A shape and tools go in one request. The model calls its tools first, and its final answer is the JSON.
+- A call can fail in three places. The stream throws if the request fails or the provider cannot ask for the schema, `text` throws if the turn did not finish, and `parse` throws if the answer does not fit.
+
+Vendors take different schemas. One written this way can be asked of any of them:
+
+- The whole answer is an object.
+- Every object lists its properties and is closed with `additionalProperties: false`.
+- Every property is required. One that may be missing is itself or `null`, like `orderId` above.
+
+Nothing enforces that style. Each provider sends what its vendor takes and refuses the rest with an error that says where. The Anthropic provider:
+
+- Leaves out `minimum`, `maximum`, `minLength`, `maxLength`, `maxItems` and a `minItems` above 1, which Anthropic does not enforce, and says each in the schema's description so the model is still told. `parse` still checks them.
+- Closes every object, as Anthropic requires. The model then writes only the properties you listed.
+- Refuses an open object with no listed properties, because Anthropic could only answer `{}` for it.
+
 ## Files
 
 `file` makes a part from bytes or from a link. Bytes are kept as base64, so the part stays plain JSON.
@@ -253,6 +296,11 @@ For a real one:
 - Anything only your API understands travels as a `native` part carrying your provider's name. Send your own native parts back and leave out everyone else's, so one history can pass between providers.
 - Build what you send from the fields you know. Never forward a part whole.
 - `fitToolIds` rewrites tool-call ids your API cannot accept, and `answerToolCalls` gives a result to any call that has none. Both return a copy and leave the history as it was.
+- A request may carry a `shape`. Send its schema in the form your API takes: `fitSchema` takes every schema inside it, innermost first, through a function of yours, and returns a copy.
+  - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
+  - Never send a schema whose answers you would have to rewrite on the way back. Throw instead, saying where. Throw too if your API cannot ask for a shape at all.
+  - Give the same output for the same schema every time.
+- A provider that does not know a request field ignores it. One written before `shape` existed lets the model answer in prose, and the caller's `parse` reports text that is not JSON. A scripted provider in a test can return canned JSON for the same reason.
 
 Code that only needs text can ask for the narrowest provider, and any richer one fits:
 
@@ -267,4 +315,5 @@ const summarise = (provider: Provider<UserMessage<TextPart>, Part>) => (document
 
 - No agent loop, retries, turn limits or approval flow: those are your loop, and the vendor SDK's client.
 - No retrieval, persistence or scheduling.
+- No typed answer from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
 - The Anthropic provider sends only tools you define. It cannot yet send Anthropic's server tools such as web search, and it does not carry text citations.
