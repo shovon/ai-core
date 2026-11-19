@@ -127,33 +127,32 @@ export type AnthropicToolHints = {
 /** A tool, optionally with Anthropic's settings for it. */
 export type AnthropicTool = ToolSpec & AnthropicToolHints;
 
-type Options = Omit<
+/**
+ * Anthropic's own settings for a request: everything its API takes besides
+ * what the request itself is. `model` and `max_tokens` have to be there, and
+ * the rest, such as `output_config`, `stop_sequences`, `tool_choice` and
+ * `thinking`, may be. It is the SDK's own type, so a setting Anthropic adds
+ * later arrives with a newer SDK.
+ */
+export type AnthropicSettings = Omit<
   Anthropic.MessageStreamParams,
-  "messages" | "system" | "tools"
+  "messages" | "system" | "tools" | "stream"
 >;
 
 /**
- * Anthropic's own settings for one request: any of the settings a provider is
- * made with, such as `output_config`, `stop_sequences`, `tool_choice` and
- * `thinking`. It is the SDK's own type, so a setting Anthropic adds later
- * arrives with a newer SDK.
- */
-export type AnthropicSettings = Partial<Omit<Options, "stream">>;
-
-/**
- * A request whose system prompt, given as parts, and whose tools may carry
- * hints too, and which may carry Anthropic's settings for this request alone.
+ * A request as this provider takes one. Its system prompt, given as parts,
+ * and its tools may carry hints too.
  *
- * The settings are laid over the ones the provider was made with, one at a
- * time. `output_config` is the exception: it holds settings that have nothing
- * to do with each other, so its own fields are laid over one at a time too. A
- * setting left undefined is one not given, and takes nothing away.
+ * It holds Anthropic's settings, in `native` under Anthropic's name, and they
+ * are sent as they are. The provider is made with none of its own: settings
+ * are plain data, so the ones every request shares are filled in by whatever
+ * builds the request.
  */
 export type AnthropicRequest = Request<
   AnthropicMessage,
   TextPart & AnthropicHints,
   AnthropicTool
-> & { native?: { anthropic?: AnthropicSettings } };
+> & { native: { anthropic: AnthropicSettings } };
 
 const unsendable = (part: Part) =>
   new Error(`anthropic: cannot send a "${part.type}" part`);
@@ -457,35 +456,22 @@ const fitted = (schema: Record<string, unknown>, at: string): object => {
   };
 };
 
-// What was given, without what was left undefined. That is what JSON would
-// keep, so a request means the same before it is stored and after.
-const stated = <T extends object>(settings: T): T =>
-  Object.fromEntries(
-    Object.entries(settings).filter(([, value]) => value !== undefined),
-  ) as T;
-
 /**
- * Anthropic's settings for one request, as the request gives them. The name is
- * the only evidence a request offers about whose settings they are, and a
- * request may come from storage, so anything but an object there is no settings.
+ * Anthropic's settings for a request. The name is the only evidence a request
+ * offers about whose settings they are. A request may come from storage, or
+ * from code that knows nothing of Anthropic, so one with no settings is
+ * refused here: there is no model to send it to.
  */
-const settingsOf = (native: AnthropicRequest["native"]): AnthropicSettings => {
-  const own: unknown = native?.anthropic;
-  return isRecord(own) ? stated(own) : {};
+const settingsOf = (
+  native: { readonly [provider: string]: unknown } | undefined,
+): AnthropicSettings => {
+  const own = native?.anthropic;
+  if (!isRecord(own))
+    throw new Error(
+      "anthropic: a request needs Anthropic's settings, in native.anthropic: a model and max_tokens at least",
+    );
+  return own as AnthropicSettings;
 };
-
-/**
- * The settings one request is sent with: the request's own laid over the
- * provider's. `output_config` holds an effort and a format, which have nothing
- * to do with each other, so its fields are laid over one at a time as well.
- */
-const laidOver = (options: Options, settings: AnthropicSettings): Options => ({
-  ...options,
-  ...settings,
-  output_config: settings.output_config
-    ? { ...options.output_config, ...stated(settings.output_config) }
-    : options.output_config,
-});
 
 /**
  * The `output_config` a request is sent with, with the shape it asks for put
@@ -493,9 +479,9 @@ const laidOver = (options: Options, settings: AnthropicSettings): Options => ({
  * there. A shape on the request is used in place of a format in the settings.
  */
 const outputConfig = (
-  config: Options["output_config"],
+  config: AnthropicSettings["output_config"],
   shape: ShapeSpec | undefined,
-): Options["output_config"] =>
+): AnthropicSettings["output_config"] =>
   shape
     ? {
         ...config,
@@ -565,14 +551,17 @@ const spent = (usage: Anthropic.Usage): Usage => {
   };
 };
 
+/**
+ * Anthropic's API behind the library's one port. It is made with a client and
+ * nothing else: which model answers, and how, is said by each request.
+ */
 export const anthropic = (
   client: Anthropic,
-  options: Options,
 ): Takes<AnthropicRequest, AnthropicOut> =>
   async function* ({ system, messages, tools, shape, native, signal }) {
-    // The request's settings are addressed to Anthropic by name, so they go as
-    // they are. What the request is comes after, so nothing there can replace it.
-    const settings = laidOver(options, settingsOf(native));
+    // The settings are addressed to Anthropic by name, so they go as they are.
+    // What the request is comes after, so nothing there can replace it.
+    const settings = settingsOf(native);
     const stream = client.messages.stream(
       {
         ...settings,

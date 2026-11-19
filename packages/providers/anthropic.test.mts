@@ -5,6 +5,8 @@ import {
   anthropic,
   type AnthropicMessage,
   type AnthropicOut,
+  type AnthropicRequest,
+  type AnthropicSettings,
   type AnthropicTool,
 } from "./anthropic.ts";
 import {
@@ -144,6 +146,13 @@ const client = (sent: any[], ...replies: string[]) =>
     },
   });
 const options = { model: "claude-opus-5-5", max_tokens: 1024 };
+// The provider with the settings a test's requests share. It is made the way
+// a program makes one: a function of its own around the provider, which puts
+// the settings on each request.
+const claudeWith =
+  (client: Anthropic, settings: AnthropicSettings) =>
+  (request: Omit<AnthropicRequest, "native">) =>
+    anthropic(client)({ ...request, native: { anthropic: settings } });
 const weather: ToolSpec = {
   name: "get_weather",
   description: "Weather.",
@@ -154,7 +163,7 @@ const answered = (call: ToolCall) => toolResult(call, "18C");
 const blocks = (m: any) => m.content.map((b: any) => b.type).join("+");
 
 test("a tool call is told as it is written: that it has begun, each piece of its input, then the call itself, whole", async () => {
-  const provider = anthropic(client([], thinksThenCalls), options);
+  const provider = claudeWith(client([], thinksThenCalls), options);
   const chunks: object[] = [];
   let reply: Reply<AnthropicOut> = [];
   const growing: unknown[] = [];
@@ -195,7 +204,7 @@ test("a tool call is told as it is written: that it has begun, each piece of its
 });
 
 test("reply: text streams; a tool call is left whole; thinking is told as reasoning and arrives whole as a native part", async () => {
-  const provider = anthropic(client([], thinksThenCalls), options);
+  const provider = claudeWith(client([], thinksThenCalls), options);
   const reply = await collect(provider({ messages: [user("weather?")] }));
   assert.equal(reply.length, 1);
   const [turn] = reply;
@@ -226,7 +235,7 @@ test("reply: text streams; a tool call is left whole; thinking is told as reason
 
 test("request: each origin is translated to its role; the model turn echoes back unchanged", async () => {
   const sent: any[] = [];
-  const provider = anthropic(
+  const provider = claudeWith(
     client(sent, thinksThenCalls, says("ok")),
     options,
   );
@@ -280,7 +289,7 @@ test("request: each origin is translated to its role; the model turn echoes back
 
 test("an empty list of tools is the same as none: the request does not mention tools", async () => {
   const sent: any[] = [];
-  const claude = anthropic(
+  const claude = claudeWith(
     client(sent, says("a"), says("b"), says("c")),
     options,
   );
@@ -322,7 +331,7 @@ test("a call left without a result is answered on the way out, and the history k
     ...cutShort,
     ...finish("max_tokens"),
   ]);
-  const claude = anthropic(
+  const claude = claudeWith(
     client(sent, cutOff, says("Just Toronto, then.")),
     options,
   );
@@ -369,7 +378,7 @@ test("a call left without a result is answered on the way out, and the history k
 
 test("a reply, its tool results and the next reply continue the conversation with a valid history", async () => {
   const sent: any[] = [];
-  const claude = anthropic(
+  const claude = claudeWith(
     client(sent, thinksThenCalls, says("It is 18C."), says("Colder.")),
     options,
   );
@@ -419,7 +428,7 @@ const other = (
 test("one history across two providers: each gets its own private parts back, and only its own", async () => {
   const sent: any[] = [];
   const seen: Request<PortableMessage>[] = [];
-  const claude = anthropic(
+  const claude = claudeWith(
     client(
       sent,
       thinksThenSays("A1"),
@@ -539,7 +548,7 @@ test("another provider's tool-call ids are made acceptable, and still pair with 
   ];
   const before = structuredClone(messages);
   await collect(
-    anthropic(
+    claudeWith(
       client(sent, says("ok")),
       options,
     )({ messages, tools: [weather] }),
@@ -597,7 +606,7 @@ test("hints: a cache breakpoint on a shared part reaches Anthropic, and only tha
   ];
   const before = structuredClone(messages);
   await collect(
-    anthropic(
+    claudeWith(
       client(sent, says("ok")),
       options,
     )({ messages, tools: [weather] }),
@@ -665,7 +674,7 @@ test("hints: unknown keys in the field, and hints inside a tool result, are not 
     ]),
   ) as AnthropicMessage[];
   await collect(
-    anthropic(client(sent, says("ok")), options)({ messages: stored }),
+    claudeWith(client(sent, says("ok")), options)({ messages: stored }),
   );
 
   assert.deepEqual(sent[0].messages[0].content[0], {
@@ -690,7 +699,7 @@ test("hints: a hinted history is still a portable one, and the plain helpers car
   const messages: PortableMessage[] = [user(document, "What does it say?")];
   // The other provider is typed for a portable history and is handed the hinted one unchanged.
   await collect(other(seen)({ messages }));
-  await collect(anthropic(client(sent, says("ok")), options)({ messages }));
+  await collect(claudeWith(client(sent, says("ok")), options)({ messages }));
   assert.deepEqual(
     sent[0].messages[0].content.map((b: any) => b.cache_control),
     [{ type: "ephemeral" }, undefined],
@@ -699,7 +708,7 @@ test("hints: a hinted history is still a portable one, and the plain helpers car
 
 test("the system prompt can be text parts, each with its own cache breakpoint", async () => {
   const sent: any[] = [];
-  const provider = anthropic(
+  const provider = claudeWith(
     client(sent, says("a"), says("b"), says("c"), says("d")),
     options,
   );
@@ -739,7 +748,7 @@ test("the system prompt can be text parts, each with its own cache breakpoint", 
 
 test("system parts concatenate exactly: a list means the same as its joined string", async () => {
   const sent: any[] = [];
-  const provider = anthropic(
+  const provider = claudeWith(
     client(sent, says("a"), says("b"), says("c")),
     options,
   );
@@ -787,7 +796,7 @@ test("system parts concatenate exactly: a list means the same as its joined stri
 
 test("a system part that is not text is rejected here, and nothing is sent", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   const system = JSON.parse(
     JSON.stringify([{ type: "file", mediaType: "image/png", data: "x" }]),
   );
@@ -806,14 +815,14 @@ test("a portable request, with a plain system prompt in parts, is accepted by bo
     messages: [user("hi")],
   };
   await collect(other(seen)(request));
-  await collect(anthropic(client(sent, says("ok")), options)(request));
+  await collect(claudeWith(client(sent, says("ok")), options)(request));
   assert.equal(sent[0].system, "Be brief.");
   assert.equal(seen[0]!.system, request.system);
 });
 
-test("automatic caching is a provider option and reaches the request as is", async () => {
+test("automatic caching is a setting and reaches the request as is", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), {
+  const provider = claudeWith(client(sent, says("ok")), {
     ...options,
     cache_control: { type: "ephemeral" },
   });
@@ -823,7 +832,7 @@ test("automatic caching is a provider option and reaches the request as is", asy
 
 test("a tool's settings for Anthropic are sent as they are, beside what the tool is", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok"), says("ok")), options);
   // Written the way a tool is: one value, typed by its schema, with Anthropic's settings on it.
   const strict = {
     name: "get_weather",
@@ -864,7 +873,7 @@ test("a tool's settings for Anthropic are sent as they are, beside what the tool
 
 test("a tool's settings cannot replace what the tool is, and a field for another provider is not sent", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   // Held in a variable, a tool may carry more than the type knows, as one read from storage might.
   const tool = {
     ...weather,
@@ -903,7 +912,7 @@ test("a turn ends with Anthropic's account of the response: its id and model, an
     { type: "message_stop" },
   ]);
   const replies = [stopped, says("ok")];
-  const provider = anthropic(
+  const provider = claudeWith(
     new Anthropic({
       apiKey: "test",
       fetch: async (_url, init) => {
@@ -966,7 +975,7 @@ test("a turn ends with Anthropic's account of the response: its id and model, an
 });
 
 test("a response that does not name its request still ends with the rest of the account", async () => {
-  const provider = anthropic(client([], says("ok")), options);
+  const provider = claudeWith(client([], says("ok")), options);
   const [turn] = await collect(provider({ messages: [user("hi")] }));
   assert.ok(turn?.from === "model");
   const kept: AnthropicMessage = turn;
@@ -980,7 +989,7 @@ test("a response that does not name its request still ends with the rest of the 
 });
 
 test("usage: each turn reports what it cost, with cached tokens counted into the input", async () => {
-  const plain = anthropic(client([], says("ok")), options);
+  const plain = claudeWith(client([], says("ok")), options);
   const [turn] = await collect(plain({ messages: [user("hi")] }));
   assert.deepEqual(turn?.from === "model" && turn.usage, {
     input: 1,
@@ -1006,7 +1015,7 @@ test("usage: each turn reports what it cost, with cached tokens counted into the
     ...finish("end_turn"),
   ]);
   const [second] = await collect(
-    anthropic(client([], cached), options)({ messages: [user("hi")] }),
+    claudeWith(client([], cached), options)({ messages: [user("hi")] }),
   );
   assert.deepEqual(second?.from === "model" && second.usage, {
     input: 123,
@@ -1029,7 +1038,7 @@ test("usage: thinking tokens are told as reasoning, within the output, when Anth
     },
     { type: "message_stop" },
   ]);
-  const provider = anthropic(client([], thought, says("ok")), options);
+  const provider = claudeWith(client([], thought, says("ok")), options);
   const messages: AnthropicMessage[] = [user("a colour?")];
   messages.push(...(await collect(provider({ messages }))));
   const turn = messages[1];
@@ -1057,7 +1066,7 @@ test("usage: thinking tokens are told as reasoning, within the output, when Anth
 
 test("stop reasons: a paused turn is 'pause', one this version does not know is 'unknown', never 'stop'", async () => {
   const ending = async (stop_reason: string) => {
-    const provider = anthropic(
+    const provider = claudeWith(
       client([], sse([start, ...speaks(0, "so far"), ...finish(stop_reason)])),
       options,
     );
@@ -1083,7 +1092,7 @@ test("stop reasons: a paused turn is 'pause', one this version does not know is 
 });
 
 test("each turn ends exactly once, after everything else", async () => {
-  const provider = anthropic(client([], thinksThenCalls), options);
+  const provider = claudeWith(client([], thinksThenCalls), options);
   const types: string[] = [];
   for await (const chunk of provider({ messages: [user("weather?")] }))
     types.push(chunk.type);
@@ -1130,7 +1139,7 @@ test("abort: the signal cancels the request and the stream throws", async () => 
   const controller = new AbortController();
   const chunks: string[] = [];
   const running = (async () => {
-    for await (const chunk of anthropic(
+    for await (const chunk of claudeWith(
       hanging,
       options,
     )({ messages: [user("hi")], signal: controller.signal }))
@@ -1147,7 +1156,7 @@ test("a large file's bytes are encoded without Buffer and match it byte for byte
   const sent: any[] = [];
   const data = Uint8Array.from({ length: 200_000 }, (_, i) => (i * 31) % 256);
   await collect(
-    anthropic(
+    claudeWith(
       client(sent, says("ok")),
       options,
     )({ messages: [user(file("application/pdf", data))] }),
@@ -1165,7 +1174,7 @@ test("a history is plain JSON: stored and loaded, it is equal and sends the same
     description: "Weather, with a chart.",
     schema: { type: "object" },
   };
-  const claude = anthropic(
+  const claude = claudeWith(
     client(sent, thinksThenCalls, says("It is 18C."), says("x"), says("y")),
     options,
   );
@@ -1239,7 +1248,7 @@ test("a history is plain JSON: stored and loaded, it is equal and sends the same
 
 test("a file part with no usable content is rejected here, never sent empty", async () => {
   const sent: any[] = [];
-  const claude = anthropic(client(sent, says("ok")), options);
+  const claude = claudeWith(client(sent, says("ok")), options);
   const stored = (part: object) =>
     JSON.parse(
       JSON.stringify([{ from: "user", content: [part] }]),
@@ -1277,7 +1286,7 @@ test("a turn holding only another provider's private parts is left out, not sent
     },
     user("two"),
   ];
-  await collect(anthropic(client(sent, says("ok")), options)({ messages }));
+  await collect(claudeWith(client(sent, says("ok")), options)({ messages }));
   assert.deepEqual(
     sent[0].messages.map((m: any) => m.role),
     ["user", "user"],
@@ -1286,7 +1295,7 @@ test("a turn holding only another provider's private parts is left out, not sent
 
 test("a part with no known type and no provider name is rejected here, and nothing is sent", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   // As a history comes back from storage: untyped, with a bare provider-specific part.
   const stored = (content: object[], from = "model") =>
     JSON.parse(
@@ -1315,14 +1324,14 @@ test("a part with no known type and no provider name is rejected here, and nothi
 });
 
 test("a file type Anthropic cannot take is an error, not a silent drop", async () => {
-  const provider = anthropic(client([]), options);
+  const provider = claudeWith(client([]), options);
   const audio = user(file("audio/wav", new Uint8Array()));
   await assert.rejects(collect(provider({ messages: [audio] })), /audio\/wav/);
 });
 
 test("a file a model made, in another provider's turn, goes to Anthropic as a file does anywhere", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("A cat.")), options);
+  const provider = claudeWith(client(sent, says("A cat.")), options);
   // A portable history in which some other model drew a picture.
   const drawn = file("image/png", new Uint8Array([1, 2, 3]));
   const messages: PortableMessage[] = [
@@ -1362,7 +1371,7 @@ test("a file a model made, in another provider's turn, goes to Anthropic as a fi
 
 test("a file's settings for Anthropic go on a document as they are; an image takes only its cache breakpoint", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   const settings = {
     citations: { enabled: true },
     title: "Q3 report",
@@ -1393,7 +1402,7 @@ test("a file's settings for Anthropic go on a document as they are; an image tak
 
 test("a text file goes to Anthropic as a document holding the text itself", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok"), says("ok")), options);
   const words = "Freight rose 31%.\nCafé margins held. 🚚";
   const notes = {
     ...file("text/plain", new TextEncoder().encode(words)),
@@ -1500,7 +1509,7 @@ const webSource = {
 };
 
 test("what a passage rests on is told as sources, directly after its text, each with how much text is its own", async () => {
-  const provider = anthropic(client([], citing), options);
+  const provider = claudeWith(client([], citing), options);
   const chunks: object[] = [];
   for await (const chunk of provider({ messages: [user("margins?")] }))
     chunks.push(chunk);
@@ -1515,7 +1524,7 @@ test("what a passage rests on is told as sources, directly after its text, each 
 
   // Folded, the passage has joined the text before it, and the span still says which part is cited.
   const [turn] = await collect(
-    anthropic(client([], citing), options)({ messages: [user("margins?")] }),
+    claudeWith(client([], citing), options)({ messages: [user("margins?")] }),
   );
   assert.ok(turn?.from === "model");
   assert.deepEqual(turn.content, [
@@ -1531,14 +1540,14 @@ test("what a passage rests on is told as sources, directly after its text, each 
   assert.ok(first.anthropic.type === "page_location");
   assert.equal(first.anthropic.start_page_number, 4);
   assert.equal(
-    await text(anthropic(client([], citing), options)({ messages: [] })),
+    await text(claudeWith(client([], citing), options)({ messages: [] })),
     "Margins fell, mainly on freight. Pricing was flat.",
   );
 });
 
 test("Anthropic's own sources go back as citations on the passage they support, and no one else's are sent", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, citing, says("ok"), says("ok")), options);
+  const provider = claudeWith(client(sent, citing, says("ok"), says("ok")), options);
   const messages: AnthropicMessage[] = [user("margins?")];
   messages.push(...(await collect(provider({ messages }))), user("go on"));
   await collect(provider({ messages }));
@@ -1559,7 +1568,7 @@ test("Anthropic's own sources go back as citations on the passage they support, 
 
 test("a source is sent only where Anthropic can take it: its own, after text, with a cache breakpoint kept at the end", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   const messages: AnthropicMessage[] = [
     user("margins?"),
     {
@@ -1614,7 +1623,7 @@ const verdict = {
 // The schema Anthropic was sent for a shape, and nothing else of the request.
 const sentFor = async (schema: object) => {
   const sent: any[] = [];
-  const claude = anthropic(client(sent, says("{}")), options);
+  const claude = claudeWith(client(sent, says("{}")), options);
   await collect(claude({ messages: [user("go")], shape: { schema } }));
   return sent[0].output_config.format.schema;
 };
@@ -1628,7 +1637,7 @@ test("a shape is asked for as Anthropic's output format, and the answer comes ba
     ...speaks(0, written.slice(0, 12), written.slice(12)),
     ...finish("end_turn"),
   ]);
-  const claude = anthropic(client(sent, inPieces, says("plain")), options);
+  const claude = claudeWith(client(sent, inPieces, says("plain")), options);
   const messages = [user("Is it safe?")];
   const before = structuredClone(verdict.schema);
   const answer = parse(
@@ -1650,13 +1659,13 @@ test("a shape is asked for as Anthropic's output format, and the answer comes ba
   assert.equal("output_config" in sent[1], false);
 });
 
-test("a shape shares output_config with the provider's own options, and is used in place of a format set there", async () => {
+test("a shape shares output_config with the request's settings, and is used in place of a format there", async () => {
   const sent: any[] = [];
   const elsewhere = {
     type: "json_schema",
     schema: { type: "string" },
   } as const;
-  const claude = anthropic(client(sent, says("{}"), says('""')), {
+  const claude = claudeWith(client(sent, says("{}"), says('""')), {
     ...options,
     output_config: { effort: "low", format: elsewhere },
   });
@@ -1666,163 +1675,86 @@ test("a shape shares output_config with the provider's own options, and is used 
     effort: "low",
     format: { type: "json_schema", schema: verdict.schema },
   });
-  // Without a shape, the options go out as they were given.
+  // Without a shape, the settings go out as they were given.
   await collect(claude({ messages }));
   assert.deepEqual(sent[1].output_config, { effort: "low", format: elsewhere });
 });
 
-// ── Settings for one request ────────────────────────────────────────────────
+// ── Settings ────────────────────────────────────────────────────────────────
 
 // Everything a request was sent with but its messages.
 const settingsSent = ({ messages, ...rest }: any) => rest;
 
-test("settings for one request are laid over the provider's own, for that request alone", async () => {
+test("a request's settings for Anthropic are sent as they are, and nothing else in the field is", async () => {
   const sent: any[] = [];
-  const claude = anthropic(client(sent, says("ok"), says("ok")), {
-    ...options,
-    output_config: { effort: "high" },
-    stop_sequences: ["END"],
-    cache_control: { type: "ephemeral" },
-  });
-  const messages = [user("go")];
-  await collect(
-    claude({
-      messages,
-      native: {
-        anthropic: {
-          model: "claude-haiku-5-5",
-          output_config: { effort: "low" },
-          stop_sequences: ["\n"],
-          tool_choice: { type: "none" },
-        },
-      },
-    }),
-  );
-  // Each setting given takes the place of the provider's; the rest stay. The
-  // field itself is never sent.
-  assert.deepEqual(settingsSent(sent[0]), {
-    model: "claude-haiku-5-5",
-    max_tokens: 1024,
-    output_config: { effort: "low" },
-    stop_sequences: ["\n"],
-    cache_control: { type: "ephemeral" },
-    tool_choice: { type: "none" },
-    stream: true,
-  });
-  // The next request, with no settings, goes as the provider was made.
-  await collect(claude({ messages }));
-  assert.deepEqual(settingsSent(sent[1]), {
-    model: "claude-opus-5-5",
-    max_tokens: 1024,
-    output_config: { effort: "high" },
-    stop_sequences: ["END"],
-    cache_control: { type: "ephemeral" },
-    stream: true,
-  });
-});
-
-test("output_config is laid over one field at a time, and a shape is used in place of a format from anywhere", async () => {
-  const sent: any[] = [];
-  const elsewhere = {
-    type: "json_schema",
-    schema: { type: "string" },
-  } as const;
-  const another = {
-    type: "json_schema",
-    schema: { type: "number" },
-  } as const;
-  const claude = anthropic(client(sent, says('""'), says("0"), says("{}")), {
-    ...options,
-    output_config: { effort: "high", format: elsewhere },
-  });
-  const messages = [user("go")];
-  // An effort for one request keeps the format the provider was made with.
-  await collect(
-    claude({
-      messages,
-      native: { anthropic: { output_config: { effort: "low" } } },
-    }),
-  );
-  assert.deepEqual(sent[0].output_config, { effort: "low", format: elsewhere });
-  // A format for one request keeps the effort.
-  await collect(
-    claude({
-      messages,
-      native: { anthropic: { output_config: { format: another } } },
-    }),
-  );
-  assert.deepEqual(sent[1].output_config, { effort: "high", format: another });
-  // A shape is what the request asks for, so no format takes its place.
-  await collect(
-    claude({
-      messages,
-      shape: verdict,
-      native: {
-        anthropic: { output_config: { effort: "low", format: another } },
-      },
-    }),
-  );
-  assert.deepEqual(sent[2].output_config, {
-    effort: "low",
-    format: { type: "json_schema", schema: verdict.schema },
-  });
-  // A provider made with no output_config takes one from the request whole.
-  const alone: any[] = [];
-  const bare = anthropic(client(alone, says("ok")), options);
-  await collect(
-    bare({
-      messages,
-      native: { anthropic: { output_config: { effort: "low" } } },
-    }),
-  );
-  assert.deepEqual(alone[0].output_config, { effort: "low" });
-});
-
-test("a setting left undefined takes nothing away, and an entry for another provider is not read", async () => {
-  const sent: any[] = [];
-  const made = {
-    ...options,
-    output_config: { effort: "high" },
-    stop_sequences: ["END"],
-  } as const;
-  const claude = anthropic(client(sent, says("ok"), says("ok")), {
-    ...made,
-    stop_sequences: [...made.stop_sequences],
-  });
+  const claude = anthropic(client(sent, says("ok"), says("ok"), says("ok")));
   const request = {
     messages: [user("go")],
     native: {
       anthropic: {
-        model: undefined,
-        stop_sequences: undefined,
-        output_config: { effort: undefined },
+        model: "claude-haiku-5-5",
+        max_tokens: 256,
+        output_config: { effort: "low" },
+        stop_sequences: ["\n"],
+        tool_choice: { type: "none" },
       },
-      other: { stop_sequences: ["X"], temperature: 0 },
+      other: { temperature: 0 },
     },
-  };
+  } satisfies AnthropicRequest;
   await collect(claude(request));
-  assert.deepEqual(settingsSent(sent[0]), { ...made, stream: true });
-  // Stored and loaded, the request means the same.
+  // The field itself is never sent, and neither is another provider's entry.
+  assert.deepEqual(settingsSent(sent[0]), {
+    model: "claude-haiku-5-5",
+    max_tokens: 256,
+    output_config: { effort: "low" },
+    stop_sequences: ["\n"],
+    tool_choice: { type: "none" },
+    stream: true,
+  });
+  // The provider keeps nothing from one request to the next: each says its own.
+  await collect(
+    claude({ messages: request.messages, native: { anthropic: options } }),
+  );
+  assert.deepEqual(settingsSent(sent[1]), { ...options, stream: true });
+  // Settings are plain data: stored and loaded, the request is sent the same.
   await collect(claude(JSON.parse(JSON.stringify(request))));
-  assert.deepEqual(sent[1], sent[0]);
+  assert.deepEqual(sent[2], sent[0]);
 });
 
-test("settings cannot replace what the request is, and anything there but an object is no settings", async () => {
+test("a request with no settings for Anthropic is refused here, and nothing is sent", async () => {
   const sent: any[] = [];
-  const claude = anthropic(
-    client(sent, says("ok"), says("ok"), says("ok")),
-    options,
-  );
-  // Any provider's request type takes the field: what is in it rides along unseen.
-  const portable: Provider<PortableMessage, Part> = claude;
+  const claude = anthropic(client(sent));
+  // As code that knows nothing of Anthropic might call it, or with a request read from storage.
+  const loose = claude as (request: any) => ReturnType<typeof claude>;
+  const without = [
+    undefined,
+    {},
+    { other: options },
+    { anthropic: null },
+    { anthropic: "claude-opus-5-5" },
+    { anthropic: [options] },
+  ];
+  for (const native of without)
+    await assert.rejects(
+      collect(loose({ messages: [user("hi")], native })),
+      /a request needs Anthropic's settings, in native\.anthropic/,
+    );
+  assert.equal(sent.length, 0);
+});
+
+test("settings cannot replace what the request is", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("ok"), says("ok")));
+  // Held in a variable, settings may carry more than the type knows, as ones read from storage might.
   const replacing = {
+    ...options,
     messages: [],
     system: "Replaced.",
     tools: [{ name: "replaced" }],
-    stop_sequences: ["\n"],
+    stream: false,
   };
   await collect(
-    portable({
+    claude({
       system: "Be brief.",
       messages: [user("hi")],
       tools: [weather],
@@ -1835,40 +1767,52 @@ test("settings cannot replace what the request is, and anything there but an obj
     sent[0].tools.map((tool: any) => tool.name),
     ["get_weather"],
   );
-  assert.deepEqual(sent[0].stop_sequences, ["\n"]);
+  assert.equal(sent[0].stream, true);
   // A request with no system prompt and no tools still has none.
   await collect(
-    portable({ messages: [user("hi")], native: { anthropic: replacing } }),
+    claude({ messages: [user("hi")], native: { anthropic: replacing } }),
   );
   assert.equal(sent[1].messages.length, 1);
   assert.equal("system" in sent[1], false);
   assert.equal("tools" in sent[1], false);
-  // As one read from storage might be: not settings at all.
-  await collect(
-    portable({ messages: [user("hi")], native: { anthropic: "low" } }),
-  );
-  assert.deepEqual(settingsSent(sent[2]), { ...options, stream: true });
 });
 
-test("settings ride through a wrapper that knows nothing of Anthropic", async () => {
+test("settings filled in by a function of the program's own make a provider that any wrapper takes", async () => {
   const sent: any[] = [];
-  const claude = anthropic(client(sent, says("ok")), options);
-  // Typed against Provider, as a wrapper for any provider would be. It changes
-  // one field and passes the rest of the request on.
+  const claude = anthropic(client(sent, says("ok"), says("ok")));
+  // Settings are a value, and what fills them in is plain TypeScript.
+  const opus = {
+    ...options,
+    output_config: { effort: "high" },
+  } satisfies AnthropicSettings;
+  const provider: Provider<PortableMessage, Part> = (request) =>
+    claude({ ...request, native: { anthropic: opus } });
+  // A wrapper that knows nothing of Anthropic: it is typed against Provider,
+  // changes one field and passes the rest of the request on.
   const brief =
     <In extends AnyMessage, Out extends Part>(
-      provider: Provider<In, Out>,
+      inner: Provider<In, Out>,
     ): Provider<In, Out> =>
     (request) =>
-      provider({ ...request, system: "Be brief." });
+      inner({ ...request, system: "Be brief." });
+  await collect(brief(provider)({ messages: [user("hi")] }));
+  assert.deepEqual(settingsSent(sent[0]), {
+    ...opus,
+    system: "Be brief.",
+    stream: true,
+  });
+  // A request that differs from the rest is the same value with one setting changed.
   await collect(
-    brief(claude)({
+    claude({
       messages: [user("hi")],
-      native: { anthropic: { output_config: { effort: "low" } } },
+      native: { anthropic: { ...opus, output_config: { effort: "low" } } },
     }),
   );
-  assert.equal(sent[0].system, "Be brief.");
-  assert.deepEqual(sent[0].output_config, { effort: "low" });
+  assert.deepEqual(settingsSent(sent[1]), {
+    ...options,
+    output_config: { effort: "low" },
+    stream: true,
+  });
 });
 
 test("a shape's bounds that Anthropic does not enforce are left out and said in the description; the reader still checks them", async () => {
@@ -1983,7 +1927,7 @@ test("a shape's objects are closed for Anthropic, at every depth, and a schema t
 
 test("a shape holding an open object with no listed properties is refused, saying where, and nothing is sent", async () => {
   const sent: any[] = [];
-  const claude = anthropic(client(sent, says("{}")), options);
+  const claude = claudeWith(client(sent, says("{}")), options);
   const asking = (schema: object) =>
     collect(claude({ messages: [user("go")], shape: { schema } }));
   await assert.rejects(
@@ -2015,7 +1959,7 @@ test("a shaped answer that was cut off ends as any other turn does: it is the re
     ...speaks(0, '{"ok":tr'),
     ...finish("max_tokens"),
   ]);
-  const claude = anthropic(client([], cutOff, cutOff), options);
+  const claude = claudeWith(client([], cutOff, cutOff), options);
   const request = { messages: [user("Is it safe?")], shape: verdict };
   const [turn] = await collect(claude(request));
   assert.ok(turn?.from === "model" && turn.end === "length");
@@ -2025,7 +1969,7 @@ test("a shaped answer that was cut off ends as any other turn does: it is the re
 
 test("a shape and tools go in one request: the tools are called first, and the final answer is the JSON", async () => {
   const sent: any[] = [];
-  const claude = anthropic(
+  const claude = claudeWith(
     client(
       sent,
       thinksThenCalls,
@@ -2064,7 +2008,10 @@ test("a shape and tools go in one request: the tools are called first, and the f
 });
 
 // Must not compile: a provider-specific part with no provider name on it.
-export const illegal = (claude: ReturnType<typeof anthropic>) => {
+export const illegal = (
+  claude: ReturnType<typeof claudeWith>,
+  bare: ReturnType<typeof anthropic>,
+) => {
   claude({
     messages: [
       // @ts-expect-error a bare provider-specific part is not part of a portable history
@@ -2115,46 +2062,54 @@ export const illegal = (claude: ReturnType<typeof anthropic>) => {
   claude({ messages: [], tools: [{ ...weather, anthropic: { loud: true } }] });
   // @ts-expect-error and what the tool is cannot be set among them
   claude({ messages: [], tools: [{ ...weather, anthropic: { name: "x" } }] });
-  claude({
+  // @ts-expect-error a request to Anthropic says its settings: nothing else names a model
+  bare({ messages: [] });
+  bare({
     messages: [],
-    // @ts-expect-error a setting for one request has to be one Anthropic defines
-    native: { anthropic: { output_config: { effort: "lowest" } } },
+    // @ts-expect-error and a model and a limit are among them
+    native: { anthropic: { output_config: { effort: "low" } } },
   });
-  claude({
+  bare({
+    messages: [],
+    // @ts-expect-error a setting has to be one Anthropic defines
+    native: { anthropic: { ...options, output_config: { effort: "lowest" } } },
+  });
+  bare({
     messages: [],
     // @ts-expect-error the provider always streams, so that is not a setting
-    native: { anthropic: { stream: false } },
+    native: { anthropic: { ...options, stream: false } },
   });
-  claude({
+  bare({
     messages: [],
     // @ts-expect-error what the request is cannot be set among them
-    native: { anthropic: { system: "Replaced." } },
+    native: { anthropic: { ...options, system: "Replaced." } },
   });
-  claude({
+  bare({
     messages: [],
+    native: { anthropic: options },
     // @ts-expect-error a vendor's settings go in `native`, never beside the request's own fields
-    anthropic: { output_config: { effort: "low" } },
+    anthropic: options,
   });
+  // @ts-expect-error until its settings are filled in, it does not take a portable request
+  const portable: Provider<PortableMessage, Part> = bare;
+  String(portable);
   // A wrapper that leaves the request's type as it is keeps its settings checked.
   const same =
     <R, Out extends Part>(provider: Takes<R, Out>): Takes<R, Out> =>
     (request) =>
       provider(request);
-  same(claude)({
+  same(bare)({
     messages: [],
     // @ts-expect-error through such a wrapper, a setting still has to be one Anthropic defines
-    native: { anthropic: { output_config: { effort: "lowest" } } },
+    native: { anthropic: { ...options, output_config: { effort: "lowest" } } },
   });
-  same(claude)({
-    messages: [],
-    native: { anthropic: { output_config: { effort: "low" } } },
-  });
+  same(bare)({ messages: [], native: { anthropic: options } });
 };
 
 // ── Reasoning ───────────────────────────────────────────────────────────────
 
 test("thinking is told the moment it begins, before anything of it can be shown", async () => {
-  const provider = anthropic(client([], thinksThenSays("Blue.")), options);
+  const provider = claudeWith(client([], thinksThenSays("Blue.")), options);
   const chunks: object[] = [];
   for await (const chunk of provider({ messages: [user("a colour?")] }))
     chunks.push(chunk);
@@ -2197,7 +2152,7 @@ test("thinking that Anthropic does not show is still told: a reasoning part with
     },
     { type: "content_block_stop", index: 1 },
   ];
-  const provider = anthropic(
+  const provider = claudeWith(
     client(
       [],
       sse([
@@ -2242,7 +2197,7 @@ test("thinking that Anthropic does not show is still told: a reasoning part with
 
 test("reasoning is never sent: with it in a history or taken out, the request is the same", async () => {
   const sent: any[] = [];
-  const provider = anthropic(
+  const provider = claudeWith(
     client(sent, thinksThenSays("Blue."), says("ok"), says("ok")),
     options,
   );
@@ -2274,7 +2229,7 @@ test("reasoning is never sent: with it in a history or taken out, the request is
 
 test("tool input is never sent: with it in a history or taken out, the request is the same", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok"), says("ok")), options);
   // A turn whose stream stopped while a call was being written, kept as it was.
   const messages: PortableMessage[] = [
     user("the weather?"),
@@ -2311,7 +2266,7 @@ test("tool input is never sent: with it in a history or taken out, the request i
 
 test("a turn holding only reasoning is left out, not sent empty", async () => {
   const sent: any[] = [];
-  const provider = anthropic(client(sent, says("ok")), options);
+  const provider = claudeWith(client(sent, says("ok")), options);
   const messages: PortableMessage[] = [
     user("a colour?"),
     {

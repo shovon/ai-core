@@ -10,12 +10,21 @@ A provider comes from `@ai-agent-library/providers`, one import per vendor. You 
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic } from "@ai-agent-library/providers/anthropic";
+import { anthropic, type AnthropicRequest, type AnthropicSettings } from "@ai-agent-library/providers/anthropic";
 
-const provider = anthropic(new Anthropic(), { model: "claude-opus-5-5", max_tokens: 64000 });
+const claude = anthropic(new Anthropic());
 ```
 
-The second argument is anything Anthropic's `messages.stream` accepts, except `messages`, `system` and `tools`, which come from each request. To change one of these settings for a single request, see [Settings for one request](#settings-for-one-request).
+A client is all a provider is made with. Which model answers, and how, is said by each request, in `native` under the provider's name. Settings are plain data, so the ones every request shares are filled in by a function of your own:
+
+```ts
+const opus = { model: "claude-opus-5-5", max_tokens: 64000 } satisfies AnthropicSettings;
+
+const provider = (request: Omit<AnthropicRequest, "native">) =>
+  claude({ ...request, native: { anthropic: opus } });
+```
+
+The examples below call this `provider`. The settings are anything Anthropic's `messages.stream` accepts, except `messages`, `system` and `tools`, which are the request's own. See [Settings](#settings).
 
 ## Ask once
 
@@ -428,7 +437,7 @@ for (const [i, part] of turn.content.entries()) {
 
 ## Reasoning and cost
 
-- A `reasoning` part is what the model says of its own working. It is for showing and is never sent back; `isReasoning` picks it out. With Anthropic, pass `thinking: { type: "adaptive", display: "summarized" }` to the provider to receive its text.
+- A `reasoning` part is what the model says of its own working. It is for showing and is never sent back; `isReasoning` picks it out. With Anthropic, put `thinking: { type: "adaptive", display: "summarized" }` in its settings to receive its text.
 - `totalUsage(messages)` adds up what the model turns in a history cost: `input`, `output`, `cacheRead`, `cacheWrite` and `reasoning` tokens.
 - `reasoning` is the part of `output` spent reasoning, never a count beside it. A turn carries it only when the provider says how much it was; in a total, a turn that does not say counts as none.
 - What a provider counts beyond these is in its own account of the response, under its name on the turn. With Anthropic that is `turn.anthropic?.usage`: the cache split by lifetime, server tool requests, the service tier.
@@ -492,7 +501,7 @@ const reply = provider({
 });
 ```
 
-For automatic caching, pass `cache_control: { type: "ephemeral" }` in the provider's options instead.
+For automatic caching, put `cache_control: { type: "ephemeral" }` in Anthropic's settings instead.
 
 ## Tool settings for Anthropic
 
@@ -519,42 +528,54 @@ const readFileTool = {
 - Every other provider ignores the field and is told the same tool. `parse(readFileTool.schema, call.input)` reads a call's input as before.
 - A tool's schema is sent as you wrote it. It is not fitted the way a shape's is, so where a setting narrows what Anthropic takes, its API is what says so.
 
-## Settings for one request
+## Settings
 
-A provider is made with its vendor's settings. To change some of them for a single request, put them on the request in `native`, under the provider's name.
+A provider is made with a client and nothing else. Its vendor's settings go on each request, in `native`, under the provider's name.
 
 ```ts
-const title = await text(
-  provider({
-    messages: [user("Give this conversation a title.")],
-    native: { anthropic: { output_config: { effort: "low" }, stop_sequences: ["\n"] } },
+const answer = await text(
+  claude({
+    messages: [user("Write a haiku about rain.")],
+    native: { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } },
   }),
 );
 ```
 
-- With Anthropic the entry takes any setting the provider is made with, among them `output_config`, `stop_sequences`, `tool_choice`, `thinking`, `max_tokens` and `model`. It is the SDK's own type, so a setting Anthropic adds later needs nothing but a newer SDK.
-- A setting given there takes the place of the provider's, for that request alone. The next request goes as the provider was made.
-- `output_config` is laid over one field at a time: an `effort` for one request keeps a `format` the provider was made with.
-- A `shape` on the request is used in place of a `format` from either place.
-- A setting left `undefined` is one not given, and takes nothing away. So `{ model: quick ? "claude-haiku-5-5" : undefined }` is safe to write.
-- What the request is comes from the request: `messages`, `system` and `tools` cannot be set there.
-- `native` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other, so one request can hold settings for several.
+- With Anthropic the entry is everything `messages.stream` accepts besides `messages`, `system` and `tools`. It needs `model` and `max_tokens`. Among the rest are `output_config`, `stop_sequences`, `tool_choice` and `thinking`. It is the SDK's own type, so a setting Anthropic adds later needs nothing but a newer SDK.
+- The entry is sent as it is. The provider keeps nothing from one request to the next.
+- A request with no entry for Anthropic is refused before anything is sent: there is no model to send it to.
+- What the request is comes from the request: `messages`, `system` and `tools` cannot be set there. A `shape` on the request is used in place of a `format` in `output_config`.
+- `native` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other.
 - Which stop sequence ended a turn is on the turn, as `turn.anthropic?.stop_sequence`.
 
-A function that wraps a provider passes the settings on, as long as it passes the request on:
+Nothing in the library fills settings in. They are a value, so sharing them and changing them is ordinary TypeScript:
 
 ```ts
-import type { AnyMessage, Part, Provider } from "@ai-agent-library/library";
+const opus = {
+  model: "claude-opus-5-5",
+  max_tokens: 64000,
+  output_config: { effort: "high" },
+} satisfies AnthropicSettings;
 
-const brief =
-  <In extends AnyMessage, Out extends Part>(provider: Provider<In, Out>): Provider<In, Out> =>
-  (request) =>
-    provider({ ...request, system: "Be brief." });
+// The settings every request shares: a function of your own.
+const provider = (request: Omit<AnthropicRequest, "native">) =>
+  claude({ ...request, native: { anthropic: opus } });
 
-brief(provider)({ messages, native: { anthropic: { output_config: { effort: "low" } } } });
+// One request that differs: the same value, with what differs changed.
+const title = await text(
+  claude({
+    messages: [user("Give this conversation a title.")],
+    native: { anthropic: { ...opus, output_config: { effort: "low" }, stop_sequences: ["\n"] } },
+  }),
+);
+
+// A setting that changes often: a function that takes it.
+const withEffort = (effort: "low" | "medium" | "high") => (request: Omit<AnthropicRequest, "native">) =>
+  claude({ ...request, native: { anthropic: { ...opus, output_config: { effort } } } });
 ```
 
-- Through a wrapper typed against `Provider`, as this one is, what is in `native` is not type-checked: the library does not know a vendor's settings. A wrapper typed against `Takes<R, Out>`, with the request's type left as it is, keeps them checked.
+- `claude` takes only a request that says its settings, so it does not fit where a `Provider` for any request is asked for. With them filled in, as in `provider` and `withEffort("low")`, it does, and a function that wraps any provider takes it.
+- Written as a literal, settings are type-checked wherever they are handed to `claude`.
 
 ## Write a provider
 
@@ -588,11 +609,10 @@ For a real one:
   - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
   - Never send a schema whose answers you would have to rewrite on the way back. Throw instead, saying where. Throw too if your API cannot ask for a shape at all.
   - Give the same output for the same schema every time.
-- A request may carry `native`: settings for one provider, under its name.
+- Take your vendor's settings from the request, in `native` under your provider's name. Be made with nothing but what reaches your API, such as a client.
   - Read the entry under your own name and no other, and never forward the field.
-  - Lay your entry over the settings you were made with, for that request alone. Where one of your API's settings holds several that have nothing to do with each other, lay those over one at a time too.
-  - Take what the library gives a meaning, such as `shape`, from the request itself, after the entry, so nothing in it can replace it.
-  - A request may come from storage. Treat a setting left undefined as one not given, and an entry that is not an object as no entry.
+  - Send what is in the entry as it is, and after it what the request itself says, so nothing in the entry can replace the messages, the tools or a `shape`.
+  - A request may come from storage, or from code that does not know you. If your API cannot be called without settings, throw for a request that has none.
 - A provider that does not know a request field ignores it. One written before `shape` existed lets the model answer in prose, and the caller's `JSON.parse` reports text that is not JSON. A scripted provider in a test can return canned JSON for the same reason.
 
 Code that only needs text can ask for the narrowest provider, and any richer one fits:
@@ -643,5 +663,6 @@ const collect = collecting(withAudio);
 - No agent loop, retries, turn limits or approval flow: those are your loop, and the vendor SDK's client.
 - Nothing that runs a tool. The library says what the model may call, what it called and what came of it; finding the code for a call and running it is yours.
 - No retrieval, persistence or scheduling.
+- Nothing that fills in a provider's settings. They are plain data on the request, and a function of your own shares them.
 - No structured output from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
 - The Anthropic provider sends only tools you define. It cannot yet send Anthropic's server tools such as web search, so the sources it tells of are those of documents you gave it.
