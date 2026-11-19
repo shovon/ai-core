@@ -20,6 +20,7 @@ import {
   toolResult,
   totalUsage,
   user,
+  type AnyMessage,
   type NativePart,
   type Part,
   type PortableMessage,
@@ -28,6 +29,7 @@ import {
   type Reply,
   type Request,
   type SourcePart,
+  type Takes,
   type TextPart,
   type ToolCall,
   type ToolInputPart,
@@ -1669,6 +1671,206 @@ test("a shape shares output_config with the provider's own options, and is used 
   assert.deepEqual(sent[1].output_config, { effort: "low", format: elsewhere });
 });
 
+// ── Settings for one request ────────────────────────────────────────────────
+
+// Everything a request was sent with but its messages.
+const settingsSent = ({ messages, ...rest }: any) => rest;
+
+test("settings for one request are laid over the provider's own, for that request alone", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("ok"), says("ok")), {
+    ...options,
+    output_config: { effort: "high" },
+    stop_sequences: ["END"],
+    cache_control: { type: "ephemeral" },
+  });
+  const messages = [user("go")];
+  await collect(
+    claude({
+      messages,
+      native: {
+        anthropic: {
+          model: "claude-haiku-5-5",
+          output_config: { effort: "low" },
+          stop_sequences: ["\n"],
+          tool_choice: { type: "none" },
+        },
+      },
+    }),
+  );
+  // Each setting given takes the place of the provider's; the rest stay. The
+  // field itself is never sent.
+  assert.deepEqual(settingsSent(sent[0]), {
+    model: "claude-haiku-5-5",
+    max_tokens: 1024,
+    output_config: { effort: "low" },
+    stop_sequences: ["\n"],
+    cache_control: { type: "ephemeral" },
+    tool_choice: { type: "none" },
+    stream: true,
+  });
+  // The next request, with no settings, goes as the provider was made.
+  await collect(claude({ messages }));
+  assert.deepEqual(settingsSent(sent[1]), {
+    model: "claude-opus-5-5",
+    max_tokens: 1024,
+    output_config: { effort: "high" },
+    stop_sequences: ["END"],
+    cache_control: { type: "ephemeral" },
+    stream: true,
+  });
+});
+
+test("output_config is laid over one field at a time, and a shape is used in place of a format from anywhere", async () => {
+  const sent: any[] = [];
+  const elsewhere = {
+    type: "json_schema",
+    schema: { type: "string" },
+  } as const;
+  const another = {
+    type: "json_schema",
+    schema: { type: "number" },
+  } as const;
+  const claude = anthropic(client(sent, says('""'), says("0"), says("{}")), {
+    ...options,
+    output_config: { effort: "high", format: elsewhere },
+  });
+  const messages = [user("go")];
+  // An effort for one request keeps the format the provider was made with.
+  await collect(
+    claude({
+      messages,
+      native: { anthropic: { output_config: { effort: "low" } } },
+    }),
+  );
+  assert.deepEqual(sent[0].output_config, { effort: "low", format: elsewhere });
+  // A format for one request keeps the effort.
+  await collect(
+    claude({
+      messages,
+      native: { anthropic: { output_config: { format: another } } },
+    }),
+  );
+  assert.deepEqual(sent[1].output_config, { effort: "high", format: another });
+  // A shape is what the request asks for, so no format takes its place.
+  await collect(
+    claude({
+      messages,
+      shape: verdict,
+      native: {
+        anthropic: { output_config: { effort: "low", format: another } },
+      },
+    }),
+  );
+  assert.deepEqual(sent[2].output_config, {
+    effort: "low",
+    format: { type: "json_schema", schema: verdict.schema },
+  });
+  // A provider made with no output_config takes one from the request whole.
+  const alone: any[] = [];
+  const bare = anthropic(client(alone, says("ok")), options);
+  await collect(
+    bare({
+      messages,
+      native: { anthropic: { output_config: { effort: "low" } } },
+    }),
+  );
+  assert.deepEqual(alone[0].output_config, { effort: "low" });
+});
+
+test("a setting left undefined takes nothing away, and an entry for another provider is not read", async () => {
+  const sent: any[] = [];
+  const made = {
+    ...options,
+    output_config: { effort: "high" },
+    stop_sequences: ["END"],
+  } as const;
+  const claude = anthropic(client(sent, says("ok"), says("ok")), {
+    ...made,
+    stop_sequences: [...made.stop_sequences],
+  });
+  const request = {
+    messages: [user("go")],
+    native: {
+      anthropic: {
+        model: undefined,
+        stop_sequences: undefined,
+        output_config: { effort: undefined },
+      },
+      other: { stop_sequences: ["X"], temperature: 0 },
+    },
+  };
+  await collect(claude(request));
+  assert.deepEqual(settingsSent(sent[0]), { ...made, stream: true });
+  // Stored and loaded, the request means the same.
+  await collect(claude(JSON.parse(JSON.stringify(request))));
+  assert.deepEqual(sent[1], sent[0]);
+});
+
+test("settings cannot replace what the request is, and anything there but an object is no settings", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(sent, says("ok"), says("ok"), says("ok")),
+    options,
+  );
+  // Any provider's request type takes the field: what is in it rides along unseen.
+  const portable: Provider<PortableMessage, Part> = claude;
+  const replacing = {
+    messages: [],
+    system: "Replaced.",
+    tools: [{ name: "replaced" }],
+    stop_sequences: ["\n"],
+  };
+  await collect(
+    portable({
+      system: "Be brief.",
+      messages: [user("hi")],
+      tools: [weather],
+      native: { anthropic: replacing },
+    }),
+  );
+  assert.equal(sent[0].system, "Be brief.");
+  assert.equal(sent[0].messages.length, 1);
+  assert.deepEqual(
+    sent[0].tools.map((tool: any) => tool.name),
+    ["get_weather"],
+  );
+  assert.deepEqual(sent[0].stop_sequences, ["\n"]);
+  // A request with no system prompt and no tools still has none.
+  await collect(
+    portable({ messages: [user("hi")], native: { anthropic: replacing } }),
+  );
+  assert.equal(sent[1].messages.length, 1);
+  assert.equal("system" in sent[1], false);
+  assert.equal("tools" in sent[1], false);
+  // As one read from storage might be: not settings at all.
+  await collect(
+    portable({ messages: [user("hi")], native: { anthropic: "low" } }),
+  );
+  assert.deepEqual(settingsSent(sent[2]), { ...options, stream: true });
+});
+
+test("settings ride through a wrapper that knows nothing of Anthropic", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("ok")), options);
+  // Typed against Provider, as a wrapper for any provider would be. It changes
+  // one field and passes the rest of the request on.
+  const brief =
+    <In extends AnyMessage, Out extends Part>(
+      provider: Provider<In, Out>,
+    ): Provider<In, Out> =>
+    (request) =>
+      provider({ ...request, system: "Be brief." });
+  await collect(
+    brief(claude)({
+      messages: [user("hi")],
+      native: { anthropic: { output_config: { effort: "low" } } },
+    }),
+  );
+  assert.equal(sent[0].system, "Be brief.");
+  assert.deepEqual(sent[0].output_config, { effort: "low" });
+});
+
 test("a shape's bounds that Anthropic does not enforce are left out and said in the description; the reader still checks them", async () => {
   const rated = {
     schema: {
@@ -1913,6 +2115,40 @@ export const illegal = (claude: ReturnType<typeof anthropic>) => {
   claude({ messages: [], tools: [{ ...weather, anthropic: { loud: true } }] });
   // @ts-expect-error and what the tool is cannot be set among them
   claude({ messages: [], tools: [{ ...weather, anthropic: { name: "x" } }] });
+  claude({
+    messages: [],
+    // @ts-expect-error a setting for one request has to be one Anthropic defines
+    native: { anthropic: { output_config: { effort: "lowest" } } },
+  });
+  claude({
+    messages: [],
+    // @ts-expect-error the provider always streams, so that is not a setting
+    native: { anthropic: { stream: false } },
+  });
+  claude({
+    messages: [],
+    // @ts-expect-error what the request is cannot be set among them
+    native: { anthropic: { system: "Replaced." } },
+  });
+  claude({
+    messages: [],
+    // @ts-expect-error a vendor's settings go in `native`, never beside the request's own fields
+    anthropic: { output_config: { effort: "low" } },
+  });
+  // A wrapper that leaves the request's type as it is keeps its settings checked.
+  const same =
+    <R, Out extends Part>(provider: Takes<R, Out>): Takes<R, Out> =>
+    (request) =>
+      provider(request);
+  same(claude)({
+    messages: [],
+    // @ts-expect-error through such a wrapper, a setting still has to be one Anthropic defines
+    native: { anthropic: { output_config: { effort: "lowest" } } },
+  });
+  same(claude)({
+    messages: [],
+    native: { anthropic: { output_config: { effort: "low" } } },
+  });
 };
 
 // ── Reasoning ───────────────────────────────────────────────────────────────

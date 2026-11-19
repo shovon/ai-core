@@ -15,7 +15,7 @@ import { anthropic } from "@ai-agent-library/providers/anthropic";
 const provider = anthropic(new Anthropic(), { model: "claude-opus-5-5", max_tokens: 64000 });
 ```
 
-The second argument is anything Anthropic's `messages.stream` accepts, except `messages`, `system` and `tools`, which come from each request.
+The second argument is anything Anthropic's `messages.stream` accepts, except `messages`, `system` and `tools`, which come from each request. To change one of these settings for a single request, see [Settings for one request](#settings-for-one-request).
 
 ## Ask once
 
@@ -519,6 +519,43 @@ const readFileTool = {
 - Every other provider ignores the field and is told the same tool. `parse(readFileTool.schema, call.input)` reads a call's input as before.
 - A tool's schema is sent as you wrote it. It is not fitted the way a shape's is, so where a setting narrows what Anthropic takes, its API is what says so.
 
+## Settings for one request
+
+A provider is made with its vendor's settings. To change some of them for a single request, put them on the request in `native`, under the provider's name.
+
+```ts
+const title = await text(
+  provider({
+    messages: [user("Give this conversation a title.")],
+    native: { anthropic: { output_config: { effort: "low" }, stop_sequences: ["\n"] } },
+  }),
+);
+```
+
+- With Anthropic the entry takes any setting the provider is made with, among them `output_config`, `stop_sequences`, `tool_choice`, `thinking`, `max_tokens` and `model`. It is the SDK's own type, so a setting Anthropic adds later needs nothing but a newer SDK.
+- A setting given there takes the place of the provider's, for that request alone. The next request goes as the provider was made.
+- `output_config` is laid over one field at a time: an `effort` for one request keeps a `format` the provider was made with.
+- A `shape` on the request is used in place of a `format` from either place.
+- A setting left `undefined` is one not given, and takes nothing away. So `{ model: quick ? "claude-haiku-5-5" : undefined }` is safe to write.
+- What the request is comes from the request: `messages`, `system` and `tools` cannot be set there.
+- `native` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other, so one request can hold settings for several.
+- Which stop sequence ended a turn is on the turn, as `turn.anthropic?.stop_sequence`.
+
+A function that wraps a provider passes the settings on, as long as it passes the request on:
+
+```ts
+import type { AnyMessage, Part, Provider } from "@ai-agent-library/library";
+
+const brief =
+  <In extends AnyMessage, Out extends Part>(provider: Provider<In, Out>): Provider<In, Out> =>
+  (request) =>
+    provider({ ...request, system: "Be brief." });
+
+brief(provider)({ messages, native: { anthropic: { output_config: { effort: "low" } } } });
+```
+
+- Through a wrapper typed against `Provider`, as this one is, what is in `native` is not type-checked: the library does not know a vendor's settings. A wrapper typed against `Takes<R, Out>`, with the request's type left as it is, keeps them checked.
+
 ## Write a provider
 
 A provider is one function: it takes a request and returns an async iterable of parts, with one `end` chunk closing each turn. That is all a fake for a test needs.
@@ -551,6 +588,11 @@ For a real one:
   - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
   - Never send a schema whose answers you would have to rewrite on the way back. Throw instead, saying where. Throw too if your API cannot ask for a shape at all.
   - Give the same output for the same schema every time.
+- A request may carry `native`: settings for one provider, under its name.
+  - Read the entry under your own name and no other, and never forward the field.
+  - Lay your entry over the settings you were made with, for that request alone. Where one of your API's settings holds several that have nothing to do with each other, lay those over one at a time too.
+  - Take what the library gives a meaning, such as `shape`, from the request itself, after the entry, so nothing in it can replace it.
+  - A request may come from storage. Treat a setting left undefined as one not given, and an entry that is not an object as no entry.
 - A provider that does not know a request field ignores it. One written before `shape` existed lets the model answer in prose, and the caller's `JSON.parse` reports text that is not JSON. A scripted provider in a test can return canned JSON for the same reason.
 
 Code that only needs text can ask for the narrowest provider, and any richer one fits:

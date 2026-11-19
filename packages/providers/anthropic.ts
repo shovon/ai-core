@@ -127,17 +127,33 @@ export type AnthropicToolHints = {
 /** A tool, optionally with Anthropic's settings for it. */
 export type AnthropicTool = ToolSpec & AnthropicToolHints;
 
-/** A request whose system prompt, given as parts, and whose tools may carry hints too. */
-export type AnthropicRequest = Request<
-  AnthropicMessage,
-  TextPart & AnthropicHints,
-  AnthropicTool
->;
-
 type Options = Omit<
   Anthropic.MessageStreamParams,
   "messages" | "system" | "tools"
 >;
+
+/**
+ * Anthropic's own settings for one request: any of the settings a provider is
+ * made with, such as `output_config`, `stop_sequences`, `tool_choice` and
+ * `thinking`. It is the SDK's own type, so a setting Anthropic adds later
+ * arrives with a newer SDK.
+ */
+export type AnthropicSettings = Partial<Omit<Options, "stream">>;
+
+/**
+ * A request whose system prompt, given as parts, and whose tools may carry
+ * hints too, and which may carry Anthropic's settings for this request alone.
+ *
+ * The settings are laid over the ones the provider was made with, one at a
+ * time. `output_config` is the exception: it holds settings that have nothing
+ * to do with each other, so its own fields are laid over one at a time too. A
+ * setting left undefined is one not given, and takes nothing away.
+ */
+export type AnthropicRequest = Request<
+  AnthropicMessage,
+  TextPart & AnthropicHints,
+  AnthropicTool
+> & { native?: { anthropic?: AnthropicSettings } };
 
 const unsendable = (part: Part) =>
   new Error(`anthropic: cannot send a "${part.type}" part`);
@@ -441,10 +457,40 @@ const fitted = (schema: Record<string, unknown>, at: string): object => {
   };
 };
 
+// What was given, without what was left undefined. That is what JSON would
+// keep, so a request means the same before it is stored and after.
+const stated = <T extends object>(settings: T): T =>
+  Object.fromEntries(
+    Object.entries(settings).filter(([, value]) => value !== undefined),
+  ) as T;
+
 /**
- * The provider's own `output_config`, with the shape a request asks for put in
- * as its format. The two share one object: the options may set `effort` there.
- * A shape on the request is used in place of a format in the options.
+ * Anthropic's settings for one request, as the request gives them. The name is
+ * the only evidence a request offers about whose settings they are, and a
+ * request may come from storage, so anything but an object there is no settings.
+ */
+const settingsOf = (native: AnthropicRequest["native"]): AnthropicSettings => {
+  const own: unknown = native?.anthropic;
+  return isRecord(own) ? stated(own) : {};
+};
+
+/**
+ * The settings one request is sent with: the request's own laid over the
+ * provider's. `output_config` holds an effort and a format, which have nothing
+ * to do with each other, so its fields are laid over one at a time as well.
+ */
+const laidOver = (options: Options, settings: AnthropicSettings): Options => ({
+  ...options,
+  ...settings,
+  output_config: settings.output_config
+    ? { ...options.output_config, ...stated(settings.output_config) }
+    : options.output_config,
+});
+
+/**
+ * The `output_config` a request is sent with, with the shape it asks for put
+ * in as its format. The two share one object: the settings may hold `effort`
+ * there. A shape on the request is used in place of a format in the settings.
  */
 const outputConfig = (
   config: Options["output_config"],
@@ -523,11 +569,14 @@ export const anthropic = (
   client: Anthropic,
   options: Options,
 ): Takes<AnthropicRequest, AnthropicOut> =>
-  async function* ({ system, messages, tools, shape, signal }) {
+  async function* ({ system, messages, tools, shape, native, signal }) {
+    // The request's settings are addressed to Anthropic by name, so they go as
+    // they are. What the request is comes after, so nothing there can replace it.
+    const settings = laidOver(options, settingsOf(native));
     const stream = client.messages.stream(
       {
-        ...options,
-        output_config: outputConfig(options.output_config, shape),
+        ...settings,
+        output_config: outputConfig(settings.output_config, shape),
         system: instructions(system),
         // Anthropic has no empty turn; one can be left after foreign parts are dropped.
         messages: fitToolIds(
