@@ -16,6 +16,7 @@ import {
   append,
   collect,
   file,
+  isEnd,
   isSource,
   isText,
   isToolInput,
@@ -2735,4 +2736,83 @@ test("a caller who makes the call reaches what the provider does not pass on: ev
   );
   // The SDK's second argument is the caller's to give.
   assert.equal(asked[0]?.get("x-trace"), "t1");
+});
+
+// The recipe in this package's README, as it is written there: a provider of
+// the caller's own, made from the two halves, that keeps what the response's
+// headers say of the rate limits.
+const rateLimits = (headers: Headers | undefined) =>
+  Object.fromEntries(
+    [...(headers ?? [])].filter(([name]) =>
+      name.startsWith("anthropic-ratelimit-"),
+    ),
+  );
+const keepingHeaders = (client: Anthropic) =>
+  async function* (request: AnthropicRequest) {
+    const stream = client.messages.stream(params(request), {
+      signal: request.signal,
+    });
+    for await (const chunk of read(stream))
+      yield isEnd(chunk)
+        ? {
+            ...chunk,
+            anthropic: {
+              ...chunk.anthropic,
+              headers: rateLimits(stream.response?.headers),
+            },
+          }
+        : chunk;
+  };
+type KeepingHeaders = AnthropicMessage & {
+  anthropic?: { headers?: Record<string, string> };
+};
+
+test("a provider of the caller's own, made from the two halves, keeps a response's headers on the turn", async () => {
+  const sent: any[] = [];
+  const sdk = new Anthropic({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(says("Hi."), {
+        headers: {
+          "content-type": "text/event-stream",
+          "request-id": "req_1",
+          "anthropic-organization-id": "org_1",
+          "anthropic-ratelimit-requests-remaining": "41",
+          "anthropic-ratelimit-tokens-remaining": "9000",
+        },
+      });
+    },
+  });
+  // It is a provider like the one it is made from, and fits where that does.
+  const provider: Takes<AnthropicRequest, AnthropicOut> = keepingHeaders(sdk);
+  const request = (messages: KeepingHeaders[]): AnthropicRequest => ({
+    messages,
+    settings: { anthropic: options },
+  });
+
+  const made = provider(request([user("hi")]));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 0);
+
+  const messages: KeepingHeaders[] = [user("hi")];
+  messages.push(...(await collect(provider(request(messages)))));
+  const turn = messages[1];
+  assert.ok(turn?.from === "model");
+  // Only the headers the caller chose, beside the rest of Anthropic's account.
+  assert.deepEqual(turn.anthropic?.headers, {
+    "anthropic-ratelimit-requests-remaining": "41",
+    "anthropic-ratelimit-tokens-remaining": "9000",
+  });
+  assert.equal(turn.anthropic?.request_id, "req_1");
+  assert.equal(turn.id, "msg_1");
+  // The turn is still plain JSON, and nothing kept on it is sent.
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), messages);
+  messages.push(user("again"));
+  await collect(provider(request(messages)));
+  assert.deepEqual(sent[1].messages[1], {
+    role: "assistant",
+    content: [{ type: "text", text: "Hi." }],
+  });
+  assert.equal(await text(made), "Hi.");
 });

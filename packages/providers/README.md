@@ -49,3 +49,49 @@ stream.response?.headers.get("anthropic-ratelimit-requests-remaining");
 - The SDK sends the request when the stream is made. The provider sends nothing until its own stream is first read.
 - `read` yields one turn, closed by one `end`, exactly as the provider does. It takes anything that has the stream's events, its `currentMessage`, its `finalMessage()` and its `request_id`.
 - This is code written against Anthropic's SDK. Code that is handed a provider cannot do it, because it never sees the client.
+
+### Keep a response's headers
+
+The provider does not keep a response's headers. A provider of your own that does is a few lines around the two halves:
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { isEnd } from "@ai-agent-library/library";
+import { params, read, type AnthropicMessage, type AnthropicRequest } from "@ai-agent-library/providers/anthropic";
+
+// Which headers are kept is yours to say. Here: what Anthropic says of the rate limits.
+const rateLimits = (headers: Headers | undefined) =>
+  Object.fromEntries([...(headers ?? [])].filter(([name]) => name.startsWith("anthropic-ratelimit-")));
+
+const keepingHeaders = (client: Anthropic) =>
+  async function* (request: AnthropicRequest) {
+    const stream = client.messages.stream(params(request), { signal: request.signal });
+    for await (const chunk of read(stream))
+      yield isEnd(chunk)
+        ? { ...chunk, anthropic: { ...chunk.anthropic, headers: rateLimits(stream.response?.headers) } }
+        : chunk;
+  };
+
+const claude = keepingHeaders(new Anthropic());
+```
+
+To read them from a turn, say that your history may hold them:
+
+```ts
+import { collect, user } from "@ai-agent-library/library";
+
+type KeepingHeaders = AnthropicMessage & { anthropic?: { headers?: Record<string, string> } };
+
+const settings = { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } };
+const messages: KeepingHeaders[] = [user("Hello.")];
+messages.push(...(await collect(claude({ messages, settings }))));
+
+const turn = messages.at(-1);
+if (turn?.from === "model") turn.anthropic?.headers?.["anthropic-ratelimit-requests-remaining"];
+```
+
+- `append` keeps whatever an `end` carries. So the headers are on the turn, beside the rest of Anthropic's account of the response, and in a stored history as plain JSON. They are never sent.
+- It is a provider like the one it is made from. It fits wherever `anthropic(client)` does, and sends nothing until its stream is first read.
+- The headers come with the `end`, so a stream that is cut off leaves none on its turn. To read them sooner, hold the SDK's stream as in [Make the call yourself](#make-the-call-yourself).
+- Kept whole, the headers hold everything the response carries, such as Anthropic's id for your organisation, and all of it goes wherever the history goes. That is why the example names the ones it keeps.
+- The headers of a request that failed need none of this. They are on the error the SDK throws.
