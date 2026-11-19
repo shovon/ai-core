@@ -127,17 +127,32 @@ export type AnthropicToolHints = {
 /** A tool, optionally with Anthropic's settings for it. */
 export type AnthropicTool = ToolSpec & AnthropicToolHints;
 
-/** A request whose system prompt, given as parts, and whose tools may carry hints too. */
+/**
+ * Anthropic's own settings for a request: everything its API takes besides
+ * what the request itself is. `model` and `max_tokens` have to be there, and
+ * the rest, such as `output_config`, `stop_sequences`, `tool_choice` and
+ * `thinking`, may be. It is the SDK's own type, so a setting Anthropic adds
+ * later arrives with a newer SDK.
+ */
+export type AnthropicSettings = Omit<
+  Anthropic.MessageStreamParams,
+  "messages" | "system" | "tools" | "stream"
+>;
+
+/**
+ * A request as this provider takes one. Its system prompt, given as parts,
+ * and its tools may carry hints too.
+ *
+ * It holds Anthropic's settings, in `settings` under Anthropic's name, and they
+ * are sent as they are. The provider is made with none of its own: settings
+ * are plain data, so the ones every request shares are filled in by whatever
+ * builds the request.
+ */
 export type AnthropicRequest = Request<
   AnthropicMessage,
   TextPart & AnthropicHints,
   AnthropicTool
->;
-
-type Options = Omit<
-  Anthropic.MessageStreamParams,
-  "messages" | "system" | "tools"
->;
+> & { settings: { anthropic: AnthropicSettings } };
 
 const unsendable = (part: Part) =>
   new Error(`anthropic: cannot send a "${part.type}" part`);
@@ -442,14 +457,31 @@ const fitted = (schema: Record<string, unknown>, at: string): object => {
 };
 
 /**
- * The provider's own `output_config`, with the shape a request asks for put in
- * as its format. The two share one object: the options may set `effort` there.
- * A shape on the request is used in place of a format in the options.
+ * Anthropic's settings for a request. The name is the only evidence a request
+ * offers about whose settings they are. A request may come from storage, or
+ * from code that knows nothing of Anthropic, so one with no settings is
+ * refused here: there is no model to send it to.
+ */
+const settingsOf = (
+  settings: { readonly [provider: string]: unknown } | undefined,
+): AnthropicSettings => {
+  const own = settings?.anthropic;
+  if (!isRecord(own))
+    throw new Error(
+      "anthropic: a request needs Anthropic's settings, in settings.anthropic: a model and max_tokens at least",
+    );
+  return own as AnthropicSettings;
+};
+
+/**
+ * The `output_config` a request is sent with, with the shape it asks for put
+ * in as its format. The two share one object: the settings may hold `effort`
+ * there. A shape on the request is used in place of a format in the settings.
  */
 const outputConfig = (
-  config: Options["output_config"],
+  config: AnthropicSettings["output_config"],
   shape: ShapeSpec | undefined,
-): Options["output_config"] =>
+): AnthropicSettings["output_config"] =>
   shape
     ? {
         ...config,
@@ -519,15 +551,21 @@ const spent = (usage: Anthropic.Usage): Usage => {
   };
 };
 
+/**
+ * Anthropic's API behind the library's one port. It is made with a client and
+ * nothing else: which model answers, and how, is said by each request.
+ */
 export const anthropic = (
   client: Anthropic,
-  options: Options,
 ): Takes<AnthropicRequest, AnthropicOut> =>
-  async function* ({ system, messages, tools, shape, signal }) {
+  async function* ({ system, messages, tools, shape, settings, signal }) {
+    // The settings are addressed to Anthropic by name, so they go as they are.
+    // What the request is comes after, so nothing there can replace it.
+    const own = settingsOf(settings);
     const stream = client.messages.stream(
       {
-        ...options,
-        output_config: outputConfig(options.output_config, shape),
+        ...own,
+        output_config: outputConfig(own.output_config, shape),
         system: instructions(system),
         // Anthropic has no empty turn; one can be left after foreign parts are dropped.
         messages: fitToolIds(

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import Anthropic from '@anthropic-ai/sdk';
-import { anthropic } from '@ai-agent-library/providers/anthropic';
+import { anthropic, type AnthropicSettings } from '@ai-agent-library/providers/anthropic';
 import { openMigrated } from './sqlite.ts';
 import { settings } from './settings.ts';
 import { cloudflareSearch } from './features/web-search/cloudflare.ts';
@@ -76,18 +76,22 @@ app.on('ready', () => {
   const { webSearch: search, missing } = settings({ ...fromFile(path.join(app.getAppPath(), '.env')), ...process.env });
   if (!search) console.warn(`Web search is off: ${missing.join(' and ')} not set.`);
 
+  // The client finds its own credentials: ANTHROPIC_API_KEY, or the profile
+  // `ant auth login` saved. Without either, the first send says so.
+  const claude = anthropic(new Anthropic());
+  // What every request to Anthropic is sent with. This model always thinks
+  // before it answers, and by default shows none of it, which reads as a long
+  // silence. A summary is asked for instead, and arrives as reasoning while
+  // the thinking goes on.
+  const opus = {
+    model: 'claude-opus-5-5',
+    max_tokens: 64000,
+    thinking: { type: 'adaptive', display: 'summarized' },
+  } satisfies AnthropicSettings;
+
   const threads = createThreads({
     store: sqliteStore(db),
-    // The client finds its own credentials: ANTHROPIC_API_KEY, or the profile
-    // `ant auth login` saved. Without either, the first send says so.
-    // This model always thinks before it answers, and by default shows none
-    // of it, which reads as a long silence. A summary is asked for instead,
-    // and arrives as reasoning while the thinking goes on.
-    provider: anthropic(new Anthropic(), {
-      model: 'claude-opus-5-5',
-      max_tokens: 64000,
-      thinking: { type: 'adaptive', display: 'summarized' },
-    }),
+    provider: (request) => claude({ ...request, settings: { anthropic: opus } }),
     // What the model may call. It decides when; the tool's description is what it goes by.
     tools: search ? [webSearch(cloudflareSearch({ fetch, ...search, limit: 5 }))] : [],
     newId: randomUUID,

@@ -1212,6 +1212,25 @@ test("a step written against text alone accepts any richer provider", async () =
   assert.equal(await summarise(rich)("long text"), "short");
 });
 
+test("a request carries settings for a provider under its name: through a wrapper, and as plain JSON", async () => {
+  const provider = scripted([say("ok"), stop]);
+  // A wrapper for any provider: it changes one field and passes the rest on.
+  const brief =
+    <In extends AnyMessage, Out extends Part>(
+      inner: Provider<In, Out>,
+    ): Provider<In, Out> =>
+    (request) =>
+      inner({ ...request, system: "Be brief." });
+  const request: Request<AnyMessage> = {
+    messages: [user("hi")],
+    settings: { one: { effort: "low" }, two: { seed: 7 } },
+  };
+  await collect(brief(provider)(request));
+  assert.equal(provider.seen[0]!.system, "Be brief.");
+  assert.deepEqual(provider.seen[0]!.settings, request.settings);
+  assert.deepEqual(JSON.parse(JSON.stringify(request)), request);
+});
+
 // A provider that only takes ids of exactly nine letters and digits.
 const nine = (id: string) => /^[a-zA-Z0-9]{9}$/.test(id);
 const freshNine = (n: number) => `fitted${String(n).padStart(3, "0")}`;
@@ -1912,4 +1931,22 @@ export const illegal = async (
   });
   // @ts-expect-error a provider that cannot take tool messages cannot be sent tool results
   textOnly({ messages: [{ from: "tool", content: [answer] }] });
+};
+
+// Where a vendor's settings may go on a request, and where they may not.
+export const settings = (
+  // A provider written before `settings` existed: its request has no such field.
+  before: (
+    request: Omit<Request<AnyMessage>, "settings">,
+  ) => AsyncIterable<TextPart | End>,
+  any: Provider<AnyMessage, Part>,
+) => {
+  // It still fits the port, and is handed the field unseen.
+  const fits: Provider<AnyMessage, TextPart> = before;
+  fits({ messages: [], settings: { anyone: { any: "thing" } } });
+  any({
+    messages: [],
+    // @ts-expect-error a vendor's settings go in `settings`, never beside the request's own fields
+    anyone: { any: "thing" },
+  });
 };

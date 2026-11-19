@@ -226,6 +226,13 @@ export type Request<
    * for this schema throws; one that does not know the field ignores it.
    */
   shape?: ShapeSpec;
+  /**
+   * Settings addressed to one provider, under its name: that vendor's own
+   * settings for this call, such as which model answers. A provider reads the
+   * entry under its own name and ignores every other. Nothing else on a request
+   * is a vendor's: this is the one field that holds what the library does not name.
+   */
+  settings?: { readonly [provider: string]: unknown };
   /** Cancels the call. The stream then throws. Tools are yours to run, so give them the same signal to cancel them too. */
   signal?: AbortSignal;
 };
@@ -264,6 +271,14 @@ export type Request<
 // alone, so it may send that on as it is, and every setting its API has for a
 // tool stays in reach. What the tool is, its name, description and schema,
 // always comes from the tool itself.
+//
+// A request holds a provider's settings in `settings`, under that provider's
+// name: which model answers, and whatever else its API takes. A provider is
+// made with none of its own. It reads its own entry and no other, sends it as
+// it is, and never forwards the field. What the library gives a meaning, such
+// as a shape, comes from the request itself, so nothing in an entry can
+// replace it. A provider that cannot be called without settings refuses a
+// request that has none.
 //
 // A tool call's id is whatever the provider that made the call chose, and it
 // must be unique within a history. Providers disagree about what an id may
