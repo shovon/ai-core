@@ -1863,13 +1863,12 @@ test("a shape and tools go in one request: the tools are called first, and the f
 
 // Must not compile: a provider-specific part with no provider name on it.
 export const illegal = (claude: ReturnType<typeof anthropic>) => {
-  // @ts-expect-error a bare provider-specific part is not part of a portable history
   claude({
     messages: [
+      // @ts-expect-error a bare provider-specific part is not part of a portable history
       { from: "model", content: [{ type: "reasoning", encrypted: "x" }] },
     ],
   });
-  // @ts-expect-error a hint has to be one Anthropic defines
   claude({
     messages: [
       {
@@ -1878,34 +1877,35 @@ export const illegal = (claude: ReturnType<typeof anthropic>) => {
           {
             type: "text",
             text: "hi",
+            // @ts-expect-error a hint has to be one Anthropic defines
             anthropic: { cache_control: { type: "forever" } },
           },
         ],
       },
     ],
   });
-  // @ts-expect-error and nothing else may ride in the field
   claude({
     messages: [
       {
         from: "user",
+        // @ts-expect-error and nothing else may ride in the field
         content: [{ type: "text", text: "hi", anthropic: { temperature: 0 } }],
       },
     ],
   });
-  // @ts-expect-error the same holds for a hint on a system part
   claude({
     system: [
       {
         type: "text",
         text: "Rules.",
+        // @ts-expect-error the same holds for a hint on a system part
         anthropic: { cache_control: { type: "forever" } },
       },
     ],
     messages: [],
   });
-  // @ts-expect-error a system part is text, never a file
   claude({
+    // @ts-expect-error a system part is text, never a file
     system: [{ type: "file", mediaType: "image/png", data: "" }],
     messages: [],
   });

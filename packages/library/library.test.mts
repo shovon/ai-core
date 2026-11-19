@@ -1724,9 +1724,9 @@ export const illegal = async (
   rich({ messages: [{ from: "tool", content: [say("not a result")] }] });
   // @ts-expect-error a model turn cannot contain a tool result
   rich({ messages: [{ from: "model", content: [toronto, answer] }] });
-  // @ts-expect-error a reply is a list of messages, not the content of one
   rich({
     messages: [
+      // @ts-expect-error a reply is a list of messages, not the content of one
       { from: "model", content: await collect(rich({ messages: [] })) },
     ],
   });
