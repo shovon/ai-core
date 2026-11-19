@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   anthropic,
+  params,
+  read,
   type AnthropicMessage,
   type AnthropicOut,
   type AnthropicOwnTool,
@@ -2640,4 +2642,97 @@ test("a turn holding only reasoning is left out, not sent empty", async () => {
     sent[0].messages.map((m: any) => m.role),
     ["user", "user"],
   );
+});
+
+// ── The provider's two halves ───────────────────────────────────────────────
+
+const asksWeather = {
+  messages: [user("weather?")],
+  tools: [weather],
+  settings: { anthropic: options },
+} satisfies AnthropicRequest;
+
+test("the provider is its two halves put together: it asks what `params` makes, and yields what `read` reads", async () => {
+  for (const reply of [thinksThenCalls, citing, searchesThenAnswers]) {
+    const whole: any[] = [];
+    const halves: any[] = [];
+    const yielded = await Array.fromAsync(
+      anthropic(client(whole, reply))(asksWeather),
+    );
+    const readBack = await Array.fromAsync(
+      read(client(halves, reply).messages.stream(params(asksWeather))),
+    );
+    assert.deepEqual(readBack, yielded);
+    assert.deepEqual(halves, whole);
+    // The body is `params` and nothing more; the SDK adds that it is streamed.
+    assert.deepEqual(
+      whole[0],
+      JSON.parse(JSON.stringify({ ...params(asksWeather), stream: true })),
+    );
+  }
+});
+
+test("the provider sends nothing until its stream is first read; the SDK sends when its stream is made", async () => {
+  const sent: any[] = [];
+  const stream = anthropic(client(sent, says("Hi.")))(asksWeather);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 0);
+  assert.equal(await text(stream), "Hi.");
+  assert.equal(sent.length, 1);
+
+  // The SDK's stream, made and never read, has asked all the same.
+  const asked: any[] = [];
+  const made = client(asked, says("Hi.")).messages.stream(params(asksWeather));
+  await made.finalMessage();
+  assert.equal(asked.length, 1);
+});
+
+test("a caller who makes the call reaches what the provider does not pass on: every event, the response, and the SDK's options for one request", async () => {
+  const asked: Headers[] = [];
+  const sdk = new Anthropic({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      asked.push(new Headers(init?.headers));
+      return new Response(searchesThenAnswers, {
+        headers: {
+          "content-type": "text/event-stream",
+          "anthropic-ratelimit-requests-remaining": "41",
+        },
+      });
+    },
+  });
+  const stream = sdk.messages.stream(params(asksWeather), {
+    headers: { "x-trace": "t1" },
+  });
+  const events: string[] = [];
+  let query = "";
+  stream.on("streamEvent", (event) => {
+    events.push(event.type);
+    if (
+      event.type === "content_block_delta" &&
+      event.delta.type === "input_json_delta"
+    )
+      query += event.delta.partial_json;
+  });
+  const chunks = await Array.fromAsync(read(stream));
+
+  // Listening takes nothing from what is read.
+  assert.deepEqual(
+    chunks,
+    await Array.fromAsync(
+      anthropic(client([], searchesThenAnswers))(asksWeather),
+    ),
+  );
+  // What `read` makes no part of: the start of the response, and the input
+  // of a call Anthropic runs, as it is written.
+  assert.equal(events[0], "message_start");
+  assert.equal(chunks.some(isToolInput), false);
+  assert.equal(query, '{"query":"node lts"}');
+  // The response, and so its headers.
+  assert.equal(
+    stream.response?.headers.get("anthropic-ratelimit-requests-remaining"),
+    "41",
+  );
+  // The SDK's second argument is the caller's to give.
+  assert.equal(asked[0]?.get("x-trace"), "t1");
 });
