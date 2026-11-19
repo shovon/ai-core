@@ -615,110 +615,154 @@ const spent = (usage: Anthropic.Usage): Usage => {
 };
 
 /**
+ * What Anthropic's SDK is asked, made from a request: the first half of the
+ * provider. It is what `client.messages.stream` takes as its body.
+ *
+ * The settings are addressed to Anthropic by name, so they go as they are.
+ * What the request is comes after, so nothing there can replace it. A request's
+ * `signal` is no part of this: it is one of the SDK's request options, beside
+ * the body.
+ */
+export const params = ({
+  system,
+  messages,
+  tools,
+  shape,
+  settings,
+}: AnthropicRequest): Anthropic.MessageStreamParams => {
+  const { tools: theirs, ...own } = settingsOf(settings);
+  return {
+    ...own,
+    output_config: outputConfig(own.output_config, shape),
+    system: instructions(system),
+    // Anthropic has no empty turn; one can be left after foreign parts are dropped.
+    messages: fitToolIds(
+      answerToolCalls(messages, unrun),
+      fitsAnthropic,
+      freshId,
+    )
+      .map(message)
+      .filter((m) => m.content.length > 0),
+    tools: toolsSent(ownTools(theirs), tools),
+  };
+};
+
+/**
+ * What `read` needs of the SDK's stream: its events, the message as far as it
+ * has come, the message once it is whole, and the id of the request. What
+ * `client.messages.stream` returns is one, and so is anything else with these.
+ */
+export type AnthropicStream = AsyncIterable<Anthropic.MessageStreamEvent> & {
+  readonly currentMessage: Anthropic.Message | undefined;
+  finalMessage(): Promise<Anthropic.Message & { parsed_output?: unknown }>;
+  readonly request_id: string | null | undefined;
+};
+
+/**
+ * The library's parts, read from the SDK's stream: the second half of the
+ * provider. One turn, closed by one End.
+ *
+ * It takes nothing from the stream that a listener on it would miss. So a
+ * caller who makes the call, and keeps hold of the stream, reaches what is not
+ * passed on here: every event as Anthropic sent it, and the response.
+ */
+export const read = async function* (
+  stream: AnthropicStream,
+): AsyncIterable<AnthropicOut | AnthropicEnd> {
+  for await (const event of stream) {
+    if (
+      event.type === "content_block_delta" &&
+      event.delta.type === "text_delta"
+    )
+      yield { type: "text", text: event.delta.text };
+    // Thinking is told as it happens: that it has begun, then whatever of it
+    // Anthropic shows, which is nothing unless a summary was asked for. The
+    // block itself still arrives whole, below, as a native part.
+    if (
+      event.type === "content_block_start" &&
+      (event.content_block.type === "thinking" ||
+        event.content_block.type === "redacted_thinking")
+    )
+      yield { type: "reasoning", text: "" };
+    if (
+      event.type === "content_block_delta" &&
+      event.delta.type === "thinking_delta" &&
+      event.delta.thinking !== ""
+    )
+      yield { type: "reasoning", text: event.delta.thinking };
+    // A call is told as it is written: that it has begun, then each piece
+    // of its input as Anthropic sends it. The call itself still arrives
+    // whole, below, directly after its pieces, and takes their place.
+    if (
+      event.type === "content_block_start" &&
+      event.content_block.type === "tool_use"
+    )
+      yield {
+        type: "tool_input",
+        id: event.content_block.id,
+        name: event.content_block.name,
+        text: "",
+      };
+    if (
+      event.type === "content_block_delta" &&
+      event.delta.type === "input_json_delta" &&
+      event.delta.partial_json !== ""
+    ) {
+      const writing = stream.currentMessage?.content[event.index];
+      if (writing?.type === "tool_use")
+        yield {
+          type: "tool_input",
+          id: writing.id,
+          name: writing.name,
+          text: event.delta.partial_json,
+        };
+    }
+    if (event.type === "content_block_stop") {
+      const done = stream.currentMessage?.content[event.index];
+      if (done?.type === "tool_use")
+        yield {
+          type: "tool_call",
+          id: done.id,
+          name: done.name,
+          input: done.input,
+        };
+      // The passages a text block rests on are told once it is whole,
+      // directly after its text, each saying how much text is its own.
+      else if (done?.type === "text")
+        for (const citation of done.citations ?? [])
+          yield cited(citation, done.text.length);
+      else if (done)
+        yield { type: "native", provider: "anthropic", value: done };
+    }
+  }
+  // One End per turn, once the whole message is in: why it ended, what it
+  // cost, and the message itself without its content, as Anthropic's account
+  // of it. `parsed_output` is the SDK's own reading of that content, so it goes too.
+  const { content, parsed_output, ...ended } = await stream.finalMessage();
+  const end: AnthropicEnd = {
+    type: "end",
+    reason: reason(ended.stop_reason),
+    usage: spent(ended.usage),
+    id: ended.id,
+    model: ended.model,
+    anthropic: plain({ ...ended, request_id: stream.request_id ?? null }),
+  };
+  yield end;
+};
+
+/**
  * Anthropic's API behind the library's one port. It is made with a client and
  * nothing else: which model answers, and how, is said by each request.
+ *
+ * It is `params` and `read` put together, around the SDK's call. The SDK sends
+ * a request when its stream is made. This sends nothing until its own stream is
+ * first read, which is why it is a generator and not the two put end to end.
  */
 export const anthropic = (
   client: Anthropic,
 ): Takes<AnthropicRequest, AnthropicOut> =>
-  async function* ({ system, messages, tools, shape, settings, signal }) {
-    // The settings are addressed to Anthropic by name, so they go as they are.
-    // What the request is comes after, so nothing there can replace it.
-    const { tools: theirs, ...own } = settingsOf(settings);
-    const stream = client.messages.stream(
-      {
-        ...own,
-        output_config: outputConfig(own.output_config, shape),
-        system: instructions(system),
-        // Anthropic has no empty turn; one can be left after foreign parts are dropped.
-        messages: fitToolIds(
-          answerToolCalls(messages, unrun),
-          fitsAnthropic,
-          freshId,
-        )
-          .map(message)
-          .filter((m) => m.content.length > 0),
-        tools: toolsSent(ownTools(theirs), tools),
-      },
-      { signal },
+  async function* (request) {
+    yield* read(
+      client.messages.stream(params(request), { signal: request.signal }),
     );
-    for await (const event of stream) {
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta"
-      )
-        yield { type: "text", text: event.delta.text };
-      // Thinking is told as it happens: that it has begun, then whatever of it
-      // Anthropic shows, which is nothing unless a summary was asked for. The
-      // block itself still arrives whole, below, as a native part.
-      if (
-        event.type === "content_block_start" &&
-        (event.content_block.type === "thinking" ||
-          event.content_block.type === "redacted_thinking")
-      )
-        yield { type: "reasoning", text: "" };
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "thinking_delta" &&
-        event.delta.thinking !== ""
-      )
-        yield { type: "reasoning", text: event.delta.thinking };
-      // A call is told as it is written: that it has begun, then each piece
-      // of its input as Anthropic sends it. The call itself still arrives
-      // whole, below, directly after its pieces, and takes their place.
-      if (
-        event.type === "content_block_start" &&
-        event.content_block.type === "tool_use"
-      )
-        yield {
-          type: "tool_input",
-          id: event.content_block.id,
-          name: event.content_block.name,
-          text: "",
-        };
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "input_json_delta" &&
-        event.delta.partial_json !== ""
-      ) {
-        const writing = stream.currentMessage?.content[event.index];
-        if (writing?.type === "tool_use")
-          yield {
-            type: "tool_input",
-            id: writing.id,
-            name: writing.name,
-            text: event.delta.partial_json,
-          };
-      }
-      if (event.type === "content_block_stop") {
-        const done = stream.currentMessage?.content[event.index];
-        if (done?.type === "tool_use")
-          yield {
-            type: "tool_call",
-            id: done.id,
-            name: done.name,
-            input: done.input,
-          };
-        // The passages a text block rests on are told once it is whole,
-        // directly after its text, each saying how much text is its own.
-        else if (done?.type === "text")
-          for (const citation of done.citations ?? [])
-            yield cited(citation, done.text.length);
-        else if (done)
-          yield { type: "native", provider: "anthropic", value: done };
-      }
-    }
-    // One End per turn, once the whole message is in: why it ended, what it
-    // cost, and the message itself without its content, as Anthropic's account
-    // of it. `parsed_output` is the SDK's own reading of that content, so it goes too.
-    const { content, parsed_output, ...ended } = await stream.finalMessage();
-    const end: AnthropicEnd = {
-      type: "end",
-      reason: reason(ended.stop_reason),
-      usage: spent(ended.usage),
-      id: ended.id,
-      model: ended.model,
-      anthropic: plain({ ...ended, request_id: stream.request_id ?? null }),
-    };
-    yield end;
   };
