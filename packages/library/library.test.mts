@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   answerToolCalls,
   append,
+  appending,
   collect,
+  collecting,
   toolFailure,
   file,
   fitSchema,
@@ -14,6 +16,7 @@ import {
   isText,
   isToolCall,
   isToolInput,
+  join,
   parse,
   partial,
   pendingToolCalls,
@@ -24,6 +27,7 @@ import {
   type AnyMessage,
   type End,
   type FilePart,
+  type Join,
   type Message,
   type ModelMessage,
   type NativePart,
@@ -519,6 +523,182 @@ test("tool input whose call never arrived is kept for showing: it is no answer a
   // It is part of a history any provider can be handed.
   const kept: PortableMessage = { from: "model", content: [half] };
   assert.deepEqual(JSON.parse(JSON.stringify(kept)), kept);
+});
+
+// A kind of part this library does not name: audio, a piece at a time. Each
+// piece is the base64 of its own bytes, so pieces are kept side by side and
+// never joined as strings.
+type Audio = { type: "audio"; pieces: readonly string[] };
+const isAudio = (part: Part): part is Audio => part.type === "audio";
+const sound = (...pieces: string[]): Audio => ({ type: "audio", pieces });
+// A stream that keeps the type of its chunks, as a provider's does.
+const streamed = async function* <C>(...chunks: C[]) {
+  yield* chunks;
+};
+// The rule for it: audio joins the audio directly before it, and every other part goes by `join`.
+const withAudio: Join<TextPart | Audio> = (parts, part) => {
+  const last = parts.at(-1);
+  return last && isAudio(last) && isAudio(part)
+    ? [
+        ...parts.slice(0, -1),
+        { ...last, pieces: [...last.pieces, ...part.pieces] },
+      ]
+    : join(parts, part);
+};
+
+test("append() is appending(join) and collect() is collecting(join): the rule is the only difference", async () => {
+  const chunks = [
+    say("Check"),
+    say("ing."),
+    writes("1", "get_weather", '{"city":'),
+    writes("1", "get_weather", '"Toronto"}'),
+    toronto,
+    stop,
+    answer,
+    say("Sunny."),
+    stop,
+  ];
+  type Out = TextPart | ToolInputPart | ToolCall;
+  const empty: Reply<Out> = [];
+  const reply = chunks.reduce(append<Out>, empty);
+  assert.deepEqual(reply, [
+    { from: "model", content: [say("Checking."), toronto], end: "stop" },
+    { from: "tool", content: [answer] },
+    { from: "model", content: [say("Sunny.")], end: "stop" },
+  ]);
+  assert.deepEqual(chunks.reduce(appending<Out>(join), empty), reply);
+  assert.deepEqual(await collecting(join)(played(...chunks)), reply);
+  assert.deepEqual(await collect(played(...chunks)), reply);
+});
+
+test("a kind of part of your own arrives in pieces by a rule of your own", async () => {
+  const empty: Reply<TextPart | Audio> = [];
+  const chunks = [
+    say("Listen"),
+    say("."),
+    sound("AAAA"),
+    sound("BBBB"),
+    sound("CC=="),
+    say("Done."),
+    stop,
+  ];
+  const heard = [
+    {
+      from: "model",
+      content: [say("Listen."), sound("AAAA", "BBBB", "CC=="), say("Done.")],
+      end: "stop",
+    },
+  ];
+  // The rule joins its own kind, and text still joins as `join` says.
+  assert.deepEqual(chunks.reduce(appending(withAudio), empty), heard);
+  assert.deepEqual(await collecting(withAudio)(streamed(...chunks)), heard);
+  // Without the rule each piece is a part by itself: nothing is lost, and nothing is joined.
+  assert.deepEqual(chunks.reduce(append<TextPart | Audio>, empty), [
+    {
+      from: "model",
+      content: [
+        say("Listen."),
+        sound("AAAA"),
+        sound("BBBB"),
+        sound("CC=="),
+        say("Done."),
+      ],
+      end: "stop",
+    },
+  ]);
+  // The answer is the text alone, whatever else the turn holds.
+  assert.equal(await text(played(...chunks)), "Listen.Done.");
+  assert.deepEqual(empty, []);
+});
+
+test("a rule keeps one law: however a part is cut into pieces, the turn comes out the same", () => {
+  const empty: Reply<TextPart | Audio> = [];
+  const add = appending(withAudio);
+  const whole = [sound("AAAA", "BBBB", "CC==")].reduce(add, empty);
+  for (const cut of [
+    [sound("AAAA"), sound("BBBB"), sound("CC==")],
+    [sound("AAAA", "BBBB"), sound("CC==")],
+    [sound("AAAA"), sound("BBBB", "CC==")],
+    [sound(), sound("AAAA", "BBBB", "CC=="), sound()],
+  ])
+    assert.deepEqual(cut.reduce(add, empty), whole);
+  // `join` keeps it for the parts this library names.
+  const told = append<TextPart | ReasoningPart | ToolInputPart>;
+  const none: Reply<TextPart | ReasoningPart | ToolInputPart> = [];
+  const thinks = (t: string): ReasoningPart => ({ type: "reasoning", text: t });
+  for (const piece of [say, thinks, (t: string) => writes("1", "a", t)])
+    assert.deepEqual(
+      [piece("ab"), piece("cd")].reduce(told, none),
+      [piece("abcd")].reduce(told, none),
+    );
+});
+
+test("a rule is given the whole turn, so a piece may join a part that is not the last", () => {
+  // Two calls written at once: each piece joins the input of its own call, wherever that is.
+  type Out = TextPart | ToolInputPart | ToolCall;
+  const byCall: Join<Out> = (parts, part) => {
+    if (!isToolInput(part)) return join(parts, part);
+    const at = parts.findIndex((had) => isToolInput(had) && had.id === part.id);
+    return at < 0
+      ? [...parts, part]
+      : parts.map((had, i) =>
+          i === at && isToolInput(had)
+            ? { ...had, text: had.text + part.text }
+            : had,
+        );
+  };
+  const empty: Reply<Out> = [];
+  const pieces = [
+    writes("1", "a", '{"x":'),
+    writes("2", "b", '{"y":'),
+    writes("1", "a", "1}"),
+    writes("2", "b", "2}"),
+  ];
+  assert.deepEqual(pieces.reduce(appending(byCall), empty), [
+    {
+      from: "model",
+      content: [writes("1", "a", '{"x":1}'), writes("2", "b", '{"y":2}')],
+    },
+  ]);
+  // By `join` a piece joins only the part directly before it.
+  assert.deepEqual(pieces.reduce(append<Out>, empty), [
+    { from: "model", content: pieces },
+  ]);
+});
+
+test("appending() takes every part of a turn through the rule, the first one too, and nothing else", () => {
+  const seen: [readonly Part[], Part][] = [];
+  const watched: Join<TextPart> = (parts, part) => {
+    seen.push([parts, part]);
+    return join(parts, part);
+  };
+  const empty: Reply<TextPart> = [];
+  const reply = [say("a"), say("b"), stop, answer, say("c"), stop].reduce(
+    appending(watched),
+    empty,
+  );
+  // Neither an End nor a tool result is the rule's to join, and each turn starts from no parts.
+  assert.deepEqual(seen, [
+    [[], say("a")],
+    [[say("a")], say("b")],
+    [[], say("c")],
+  ]);
+  assert.deepEqual(reply, [
+    { from: "model", content: [say("ab")], end: "stop" },
+    { from: "tool", content: [answer] },
+    { from: "model", content: [say("c")], end: "stop" },
+  ]);
+});
+
+test("collecting() throws, as collect() does, if the stream stops in the middle of a turn", async () => {
+  await assert.rejects(
+    collecting(withAudio)(streamed(sound("AAAA"))),
+    /without an end chunk/,
+  );
+  await assert.rejects(
+    collecting(withAudio)(streamed<Audio>()),
+    /without an end chunk/,
+  );
 });
 
 test("text() is the answer alone: reasoning is no part of it", async () => {

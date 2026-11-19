@@ -536,7 +536,8 @@ const said = await text(canned({ messages: [user("Hi.")] })); // "Hello."
 
 For a real one:
 
-- Text, reasoning and tool input may be yielded in pieces. Every other part is yielded whole.
+- Text, reasoning and tool input may be yielded in pieces. Every other part the library names is yielded whole.
+- A kind of part of your own may be yielded in pieces too. Export the rule that joins them beside your provider (see [A part of your own, in pieces](#a-part-of-your-own-in-pieces)).
 - To tell of a tool call as it is written, yield `tool_input` parts for it, one after another with nothing between them, and then the call itself directly after. The call is still yielded whole, and the pieces are yours to leave out.
 - A history may hold `tool_input` parts whose call never arrived. Leave them out of what you send, as you do reasoning.
 - If your model says where its words came from, yield a `source` part directly after the text it supports, whole, with a `span`: the length of that text as you yielded it. Put what only your API knows of it in a field under your provider's name. Send your own sources back if your API takes them, and leave out everyone else's.
@@ -560,6 +561,40 @@ import { text, user, type Part, type Provider, type TextPart, type UserMessage }
 const summarise = (provider: Provider<UserMessage<TextPart>, Part>) => (document: string) =>
   text(provider({ messages: [user(`Summarise: ${document}`)] }));
 ```
+
+## A part of your own, in pieces
+
+`append` joins the pieces of text, reasoning and tool input. A provider may yield a kind of part of its own in pieces too, such as audio. How those pieces join is a rule: a function from the parts of the turn so far, and one more part, to the parts after it.
+
+- `join` is the library's own rule, the one `append` and `collect` go by.
+- `appending(rule)` is `append` with a rule of yours, and `collecting(rule)` is `collect` with it.
+
+```ts
+import { appending, collecting, join, type Join, type Part, type TextPart } from "@ai-agent-library/library";
+
+// Audio, a piece at a time. Each piece is the base64 of its own bytes, so
+// pieces are kept side by side and never joined as strings.
+type Audio = { type: "audio"; pieces: readonly string[] };
+const isAudio = (part: Part): part is Audio => part.type === "audio";
+
+const withAudio: Join<TextPart | Audio> = (parts, part) => {
+  const last = parts.at(-1);
+  return last && isAudio(last) && isAudio(part)
+    ? [...parts.slice(0, -1), { ...last, pieces: [...last.pieces, ...part.pieces] }]
+    : join(parts, part);
+};
+
+const append = appending(withAudio);
+const collect = collecting(withAudio);
+```
+
+- A rule speaks for the kinds it knows and hands every other part to `join`, as above. Rules stack the same way: one can hand on to another.
+- A rule is pure. It returns the parts and leaves those it was given as they were.
+- It keeps one law: however a part is cut into pieces, the turn comes out the same. Adding two pieces one after the other gives what adding them as one piece gives.
+- It is given the whole turn, so a piece may join a part that is not the last. That is how to fold a stream in which two parts are written at once.
+- Every part of a turn goes through the rule, the first one too. An `end` chunk and a tool result do not: turns and tool messages are folded as `append` folds them.
+- Folded without its rule, each piece is a part by itself. Nothing is lost, and nothing is joined.
+- `text` needs no rule. It reads the text alone, and the answer is the same however the other parts were joined.
 
 ## What is not here
 

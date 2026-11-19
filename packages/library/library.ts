@@ -232,8 +232,13 @@ export type Request<
 
 // ── The one port ────────────────────────────────────────────────────────────
 // Accepts messages of type In. Emits one or more turns: a turn is the model's
-// parts followed by one End. Text, reasoning and tool input arrive in pieces;
-// every other part is emitted whole.
+// parts followed by one End. Of the parts named here, text, reasoning and tool
+// input arrive in pieces, and every other one is emitted whole.
+//
+// A provider may emit a kind of part of its own in pieces too. How its pieces
+// join is then a rule (Join) the provider gives beside itself, for `appending`
+// and `collecting`. Folded without the rule, each piece is a part by itself:
+// nothing is lost, and nothing is joined.
 //
 // A provider whose model says where its words came from emits a source
 // (SourcePart) directly after the text it supports, whole, with how much of
@@ -356,7 +361,36 @@ const inPieces = (
 // The call a piece belongs to; text and reasoning belong to none.
 const callOf = (part: Part) => (isToolInput(part) ? part.id : undefined);
 
-const join = <P extends Part>(parts: readonly P[], part: P): readonly P[] => {
+/**
+ * How one more part is added to the parts of a turn still arriving: joined to
+ * what is there, or put after it. That is all it means for a kind of part to
+ * arrive in pieces, so a rule is what teaches the fold a new kind.
+ *
+ * A rule is pure: it returns the parts, and leaves those it was given as they
+ * were. It keeps one law. However a part is cut into pieces, the turn comes
+ * out the same: adding two pieces one after the other gives what adding them
+ * as one piece gives.
+ *
+ * A rule of your own speaks for the kinds it knows and hands every other part
+ * to `join`. It is given the whole turn, so it may join a piece to a part that
+ * is not the last.
+ */
+export type Join<P extends Part> = (
+  parts: readonly P[],
+  part: P,
+) => readonly P[];
+
+/**
+ * The rule for the parts this library names, and the one `append` and
+ * `collect` go by. Text joins the text directly before it, and reasoning the
+ * reasoning; tool input joins the input of the same call. A tool call takes
+ * the place of the tool input directly before it, when that is its own. Every
+ * other part is put after the rest, whole.
+ */
+export const join = <P extends Part>(
+  parts: readonly P[],
+  part: P,
+): readonly P[] => {
   const last = parts.at(-1);
   const before = parts.slice(0, -1);
   // The whole call takes the place of the pieces of its input.
@@ -372,6 +406,36 @@ const join = <P extends Part>(parts: readonly P[], part: P): readonly P[] => {
 };
 
 /**
+ * `append` with a rule of your own for joining the parts of a turn. Turns,
+ * Ends and tool results are folded as `append` folds them; only how a part
+ * joins the parts before it is the rule's to say. Every part of a turn goes
+ * through the rule, the first one too, onto no parts at all.
+ *
+ * `append` is `appending(join)`.
+ */
+export const appending =
+  <Out extends Part>(rule: Join<Out>) =>
+  (reply: Reply<Out>, chunk: Out | ToolResult | End): Reply<Out> => {
+    const last = reply.at(-1);
+    const rest = reply.slice(0, -1);
+    if (isToolResult(chunk))
+      return last?.from === "tool"
+        ? [...rest, { from: "tool", content: [...last.content, chunk] }]
+        : [...reply, { from: "tool", content: [chunk] }];
+    const arriving = last?.from === "model" && !last.end ? last : undefined;
+    if (isEnd(chunk)) {
+      // Everything the End says goes on the turn: the reason as `end`, the rest as it is.
+      const { type, reason, ...said } = chunk;
+      return arriving
+        ? [...rest, { ...arriving, end: reason, ...said }]
+        : [...reply, { from: "model", content: [], end: reason, ...said }];
+    }
+    return arriving
+      ? [...rest, { ...arriving, content: rule(arriving.content, chunk) }]
+      : [...reply, { from: "model", content: rule([], chunk) }];
+  };
+
+/**
  * Add one chunk to a reply. Pure: returns a new reply.
  * A model part joins the turn still arriving, or starts a new one. An End
  * finishes that turn, and all it carries is kept on it. A tool result joins
@@ -380,41 +444,39 @@ const join = <P extends Part>(parts: readonly P[], part: P): readonly P[] => {
  * A tool call takes the place of the tool input directly before it, when that
  * is its own. So a stream that tells of each call's input as it is written
  * comes to the same reply as one that does not.
+ *
+ * The parts of a turn are joined as `join` says. For a kind of part of your
+ * own that arrives in pieces, `appending` makes this fold from your rule.
  */
-export const append = <Out extends Part>(
+export const append: <Out extends Part>(
   reply: Reply<Out>,
   chunk: Out | ToolResult | End,
-): Reply<Out> => {
-  const last = reply.at(-1);
-  const rest = reply.slice(0, -1);
-  if (isToolResult(chunk))
-    return last?.from === "tool"
-      ? [...rest, { from: "tool", content: [...last.content, chunk] }]
-      : [...reply, { from: "tool", content: [chunk] }];
-  const arriving = last?.from === "model" && !last.end ? last : undefined;
-  if (isEnd(chunk)) {
-    // Everything the End says goes on the turn: the reason as `end`, the rest as it is.
-    const { type, reason, ...said } = chunk;
-    return arriving
-      ? [...rest, { ...arriving, end: reason, ...said }]
-      : [...reply, { from: "model", content: [], end: reason, ...said }];
-  }
-  return arriving
-    ? [...rest, { ...arriving, content: join(arriving.content, chunk) }]
-    : [...reply, { from: "model", content: [chunk] }];
-};
+) => Reply<Out> = appending(join);
+
+/**
+ * `collect` with a rule of your own for joining the parts of a turn: every
+ * message a stream produced, folded by `appending(rule)`.
+ *
+ * `collect` is `collecting(join)`.
+ */
+export const collecting =
+  <Out extends Part>(rule: Join<Out>) =>
+  async (
+    stream: AsyncIterable<Out | ToolResult | End>,
+  ): Promise<Reply<Out>> => {
+    const add = appending(rule);
+    let reply: Reply<Out> = [];
+    for await (const chunk of stream) reply = add(reply, chunk);
+    const last = reply.at(-1);
+    if (!last || (last.from === "model" && !last.end))
+      throw new Error("stream finished without an end chunk");
+    return reply;
+  };
 
 /** Every message a stream produced. Throws if it stops in the middle of a turn. */
-export const collect = async <Out extends Part>(
+export const collect: <Out extends Part>(
   stream: AsyncIterable<Out | ToolResult | End>,
-): Promise<Reply<Out>> => {
-  let reply: Reply<Out> = [];
-  for await (const chunk of stream) reply = append(reply, chunk);
-  const last = reply.at(-1);
-  if (!last || (last.from === "model" && !last.end))
-    throw new Error("stream finished without an end chunk");
-  return reply;
-};
+) => Promise<Reply<Out>> = collecting(join);
 
 const isPaused = (message: AnyMessage | undefined) =>
   message?.from === "model" && message.end === "pause";
