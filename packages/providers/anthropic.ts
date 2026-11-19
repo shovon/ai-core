@@ -128,16 +128,29 @@ export type AnthropicToolHints = {
 export type AnthropicTool = ToolSpec & AnthropicToolHints;
 
 /**
+ * A tool Anthropic defines: web search, web fetch, code execution and tool
+ * search, which Anthropic runs, and those you run, such as bash, the text
+ * editor and memory. It is every tool the SDK knows but one you define, so a
+ * tool Anthropic adds later arrives with a newer SDK.
+ */
+export type AnthropicOwnTool = Exclude<Anthropic.ToolUnion, Anthropic.Tool>;
+
+/**
  * Anthropic's own settings for a request: everything its API takes besides
  * what the request itself is. `model` and `max_tokens` have to be there, and
  * the rest, such as `output_config`, `stop_sequences`, `tool_choice` and
  * `thinking`, may be. It is the SDK's own type, so a setting Anthropic adds
  * later arrives with a newer SDK.
+ *
+ * `tools` there holds the tools Anthropic defines, and only those. They are
+ * sent as they are, before the request's own tools. A tool you define is the
+ * request's own: it goes in the request's `tools`, and where it has the name
+ * of one here, it is the one sent.
  */
 export type AnthropicSettings = Omit<
   Anthropic.MessageStreamParams,
   "messages" | "system" | "tools" | "stream"
->;
+> & { tools?: readonly AnthropicOwnTool[] };
 
 /**
  * A request as this provider takes one. Its system prompt, given as parts,
@@ -474,6 +487,56 @@ const settingsOf = (
 };
 
 /**
+ * The tools Anthropic defines, as a request's settings give them. They are
+ * addressed to Anthropic by name, so each goes as it is. The settings may come
+ * from storage, so what is there is checked for the one thing that would
+ * change what the request is: a tool of the caller's own, which has no `type`
+ * or the type "custom", is refused, and so is anything that is no tool at all.
+ */
+const ownTools = (given: unknown): AnthropicOwnTool[] => {
+  if (given === undefined) return [];
+  if (!Array.isArray(given))
+    throw new Error("anthropic: settings.anthropic.tools has to be a list");
+  return given.map((tool: unknown) => {
+    if (isRecord(tool) && typeof tool.type === "string" && tool.type !== "custom")
+      return tool as unknown as AnthropicOwnTool;
+    const named =
+      isRecord(tool) && typeof tool.name === "string" ? ` "${tool.name}"` : "";
+    throw new Error(
+      `anthropic: settings.anthropic.tools holds only tools Anthropic defines; a tool of your own${named} goes in the request's tools`,
+    );
+  });
+};
+
+/**
+ * The tools a request is sent with: Anthropic's own from the settings, then
+ * the request's, each in the order given, so the list is the same every time.
+ * Where one of each has the same name, the request's is the one sent: what the
+ * request says comes after the settings, so nothing there can replace it.
+ *
+ * A request tool's settings for Anthropic are addressed to it by name, so they
+ * go as they are. What the tool is comes after, for the same reason.
+ *
+ * No tools at all is said by leaving the field out, as an empty list is.
+ */
+const toolsSent = (
+  theirs: readonly AnthropicOwnTool[],
+  yours: readonly AnthropicTool[] = [],
+): Anthropic.ToolUnion[] | undefined => {
+  const taken = new Set(yours.map((tool) => tool.name));
+  const sent: Anthropic.ToolUnion[] = [
+    ...theirs.filter((tool) => !("name" in tool && taken.has(tool.name))),
+    ...yours.map(({ name, description, schema, anthropic }) => ({
+      ...anthropic,
+      name,
+      description,
+      input_schema: schema as Anthropic.Tool.InputSchema,
+    })),
+  ];
+  return sent.length > 0 ? sent : undefined;
+};
+
+/**
  * The `output_config` a request is sent with, with the shape it asks for put
  * in as its format. The two share one object: the settings may hold `effort`
  * there. A shape on the request is used in place of a format in the settings.
@@ -561,7 +624,7 @@ export const anthropic = (
   async function* ({ system, messages, tools, shape, settings, signal }) {
     // The settings are addressed to Anthropic by name, so they go as they are.
     // What the request is comes after, so nothing there can replace it.
-    const own = settingsOf(settings);
+    const { tools: theirs, ...own } = settingsOf(settings);
     const stream = client.messages.stream(
       {
         ...own,
@@ -575,17 +638,7 @@ export const anthropic = (
         )
           .map(message)
           .filter((m) => m.content.length > 0),
-        // An empty list is the same as none, and none is said by leaving the field out.
-        // A tool's settings for Anthropic are addressed to it by name, so they
-        // go as they are. What the tool is comes after, so nothing there can replace it.
-        tools: tools?.length
-          ? tools.map(({ name, description, schema, anthropic }) => ({
-              ...anthropic,
-              name,
-              description,
-              input_schema: schema as Anthropic.Tool.InputSchema,
-            }))
-          : undefined,
+        tools: toolsSent(ownTools(theirs), tools),
       },
       { signal },
     );

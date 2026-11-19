@@ -5,6 +5,7 @@ import {
   anthropic,
   type AnthropicMessage,
   type AnthropicOut,
+  type AnthropicOwnTool,
   type AnthropicRequest,
   type AnthropicSettings,
   type AnthropicTool,
@@ -1750,7 +1751,6 @@ test("settings cannot replace what the request is", async () => {
     ...options,
     messages: [],
     system: "Replaced.",
-    tools: [{ name: "replaced" }],
     stream: false,
   };
   await collect(
@@ -2007,6 +2007,335 @@ test("a shape and tools go in one request: the tools are called first, and the f
   });
 });
 
+// ── Anthropic's own tools ───────────────────────────────────────────────────
+
+const webSearch = {
+  type: "web_search_20260209",
+  name: "web_search",
+  max_uses: 5,
+} as const satisfies AnthropicOwnTool;
+const codeExecution = {
+  type: "code_execution_20260521",
+  name: "code_execution",
+} as const satisfies AnthropicOwnTool;
+const withTools = (...tools: AnthropicOwnTool[]) => ({
+  anthropic: { ...options, tools },
+});
+
+test("Anthropic's own tools go in its settings and are sent as they are, before the request's tools", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(sent, says("ok"), says("ok"), says("ok"), says("ok")),
+  );
+  const messages = [user("hi")];
+  const settings = withTools(webSearch, codeExecution);
+  await collect(claude({ messages, tools: [weather], settings }));
+  assert.deepEqual(sent[0].tools, [
+    webSearch,
+    codeExecution,
+    {
+      name: "get_weather",
+      description: "Weather.",
+      input_schema: { type: "object" },
+    },
+  ]);
+  // They are sent when the request has no tools of its own, or an empty list of them.
+  await collect(claude({ messages, settings }));
+  await collect(claude({ messages, tools: [], settings }));
+  assert.deepEqual(sent[1].tools, [webSearch, codeExecution]);
+  assert.deepEqual(sent[2].tools, sent[1].tools);
+  // An empty list there is the same as none: the request does not mention tools.
+  await collect(claude({ messages, settings: withTools() }));
+  assert.equal("tools" in sent[3], false);
+  // The settings are as they were, and are plain data.
+  assert.deepEqual(settings, withTools(webSearch, codeExecution));
+  assert.deepEqual(JSON.parse(JSON.stringify(settings)), settings);
+});
+
+test("a tool of the request's own wins over one of Anthropic's with its name, and the rest are still sent", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("ok")));
+  const mine: ToolSpec = {
+    name: "web_search",
+    description: "Search our wiki.",
+    schema: { type: "object" },
+  };
+  await collect(
+    claude({
+      messages: [user("hi")],
+      tools: [mine],
+      settings: withTools(webSearch, codeExecution),
+    }),
+  );
+  assert.deepEqual(sent[0].tools, [
+    codeExecution,
+    {
+      name: "web_search",
+      description: "Search our wiki.",
+      input_schema: { type: "object" },
+    },
+  ]);
+});
+
+test("a tool of your own in Anthropic's settings is refused, saying where it goes, and nothing is sent", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent));
+  // As settings read from storage might be: the type refuses each of these.
+  const loose = claude as (request: any) => ReturnType<typeof claude>;
+  const mine = { name: "get_weather", description: "Weather.", input_schema: {} };
+  for (const tools of [
+    [mine],
+    [webSearch, { ...mine, type: "custom" }],
+    [{ ...mine, type: null }],
+  ])
+    await assert.rejects(
+      collect(
+        loose({
+          messages: [user("hi")],
+          settings: { anthropic: { ...options, tools } },
+        }),
+      ),
+      /a tool of your own "get_weather" goes in the request's tools/,
+    );
+  for (const tools of [webSearch, "web_search", [null], ["web_search"]])
+    await assert.rejects(
+      collect(
+        loose({
+          messages: [user("hi")],
+          settings: { anthropic: { ...options, tools } },
+        }),
+      ),
+      /settings\.anthropic\.tools/,
+    );
+  assert.equal(sent.length, 0);
+});
+
+// A turn in which Anthropic searched the web: its call, what came of it, and
+// an answer resting on what was found.
+const searches = {
+  type: "content_block_start",
+  index: 0,
+  content_block: {
+    type: "server_tool_use",
+    id: "srvtoolu_1",
+    name: "web_search",
+    input: {},
+    caller: { type: "direct" },
+  },
+};
+const query = [
+  {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: '{"query":' },
+  },
+  {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "input_json_delta", partial_json: '"node lts"}' },
+  },
+  { type: "content_block_stop", index: 0 },
+];
+const searched = {
+  type: "server_tool_use",
+  id: "srvtoolu_1",
+  name: "web_search",
+  input: { query: "node lts" },
+  caller: { type: "direct" },
+};
+const found = {
+  type: "web_search_tool_result",
+  tool_use_id: "srvtoolu_1",
+  caller: { type: "direct" },
+  content: [
+    {
+      type: "web_search_result",
+      url: "https://example.com/rates",
+      title: "Shipping news",
+      encrypted_content: "enc",
+      page_age: null,
+    },
+  ],
+};
+const whole = (index: number, content_block: object) => [
+  { type: "content_block_start", index, content_block },
+  { type: "content_block_stop", index },
+];
+const citesWeb = (index: number, words: string) => [
+  {
+    type: "content_block_start",
+    index,
+    content_block: { type: "text", text: "", citations: [] },
+  },
+  {
+    type: "content_block_delta",
+    index,
+    delta: { type: "citations_delta", citation: onWeb },
+  },
+  {
+    type: "content_block_delta",
+    index,
+    delta: { type: "text_delta", text: words },
+  },
+  { type: "content_block_stop", index },
+];
+const searchesThenAnswers = sse([
+  start,
+  searches,
+  ...query,
+  ...whole(1, found),
+  ...citesWeb(2, "Rates doubled."),
+  ...finish("end_turn"),
+]);
+
+test("what Anthropic's tools did arrives as native parts, in order, and goes back as it came", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(sent, searchesThenAnswers, searchesThenAnswers, says("ok"), says("ok")),
+  );
+  const settings = withTools(webSearch);
+  const chunks: any[] = [];
+  for await (const chunk of claude({ messages: [user("rates?")], settings }))
+    chunks.push(chunk);
+  // The call is told once it is whole, and never as a call for the caller to run.
+  assert.deepEqual(chunks.slice(0, -1), [
+    { type: "native", provider: "anthropic", value: searched },
+    { type: "native", provider: "anthropic", value: found },
+    { type: "text", text: "Rates doubled." },
+    { ...webSource, span: "Rates doubled.".length },
+  ]);
+  const messages: AnthropicMessage[] = [user("rates?")];
+  messages.push(...(await collect(claude({ messages, settings }))));
+  // Nothing in the turn is the caller's to run or to answer.
+  assert.deepEqual(pendingToolCalls(messages), []);
+  const turn = messages.at(-1);
+  assert.equal(turn?.from === "model" && turn.end, "stop");
+  messages.push(user("and now?"));
+  const echoed = [
+    searched,
+    found,
+    { type: "text", text: "Rates doubled.", citations: [onWeb] },
+  ];
+  await collect(claude({ messages, settings }));
+  assert.deepEqual(sent[2].messages[1], { role: "assistant", content: echoed });
+  // Stored and loaded, the history sends the same request, and so it does with
+  // the tool no longer declared.
+  const stored: AnthropicMessage[] = JSON.parse(JSON.stringify(messages));
+  await collect(claude({ messages: stored, settings: { anthropic: options } }));
+  assert.deepEqual(sent[3].messages, sent[2].messages);
+  assert.equal("tools" in sent[3], false);
+});
+
+test("a failure of one of Anthropic's tools arrives in the turn, as what came of the call, and nothing is thrown", async () => {
+  const failed = {
+    type: "web_search_tool_result",
+    tool_use_id: "srvtoolu_1",
+    caller: { type: "direct" },
+    content: {
+      type: "web_search_tool_result_error",
+      error_code: "max_uses_exceeded",
+    },
+  };
+  const failing = sse([
+    start,
+    searches,
+    ...query,
+    ...whole(1, failed),
+    ...speaks(2, "I could not search."),
+    ...finish("end_turn"),
+  ]);
+  const claude = anthropic(client([], failing));
+  const [turn] = await collect(
+    claude({ messages: [user("rates?")], settings: withTools(webSearch) }),
+  );
+  assert.ok(turn?.from === "model");
+  assert.equal(turn.end, "stop");
+  assert.deepEqual(turn.content, [
+    { type: "native", provider: "anthropic", value: searched },
+    { type: "native", provider: "anthropic", value: failed },
+    { type: "text", text: "I could not search." },
+  ]);
+});
+
+test("a turn paused while Anthropic's tools run goes back as it is, and the answer reads as one", async () => {
+  const sent: any[] = [];
+  const pausing = sse([
+    start,
+    ...speaks(0, "Searching. "),
+    { ...searches, index: 1 },
+    ...query.map((event) => ({ ...event, index: 1 })),
+    ...finish("pause_turn"),
+  ]);
+  const resuming = sse([
+    start,
+    ...whole(0, found),
+    ...speaks(1, "Found it."),
+    ...finish("end_turn"),
+  ]);
+  const claude = anthropic(client(sent, pausing, resuming));
+  const settings = withTools(webSearch);
+  const messages: AnthropicMessage[] = [user("rates?")];
+  // The loop from the README: a paused turn asks for nothing, and is sent back.
+  for (;;) {
+    messages.push(...(await collect(claude({ messages, settings }))));
+    const last = messages.at(-1);
+    if (last?.from === "model" && last.end === "pause") continue;
+    break;
+  }
+  assert.equal(sent.length, 2);
+  // The paused turn is the last message of the second request, as it came.
+  assert.deepEqual(sent[1].messages, [
+    { role: "user", content: [{ type: "text", text: "rates?" }] },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Searching. " }, searched],
+    },
+  ]);
+  const said = messages
+    .flatMap((m) => (m.from === "model" ? m.content.filter(isText) : []))
+    .map((part) => part.text)
+    .join("");
+  assert.equal(said, "Searching. Found it.");
+});
+
+test("a call to a tool of Anthropic's that the caller runs is a call like any other", async () => {
+  const sent: any[] = [];
+  const bash = { type: "bash_20250124", name: "bash" } as const;
+  const callsBash = sse([
+    start,
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "tool_use", id: "toolu_1", name: "bash", input: {} },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: '{"command":"ls"}' },
+    },
+    { type: "content_block_stop", index: 0 },
+    ...finish("tool_use"),
+  ]);
+  const claude = anthropic(client(sent, callsBash, says("Two files.")));
+  const settings = withTools(bash);
+  const messages: AnthropicMessage[] = [user("what is here?")];
+  messages.push(...(await collect(claude({ messages, settings }))));
+  const calls = pendingToolCalls(messages);
+  assert.deepEqual(calls, [
+    { type: "tool_call", id: "toolu_1", name: "bash", input: { command: "ls" } },
+  ]);
+  messages.push({
+    from: "tool",
+    content: calls.map((call) => toolResult(call, "a.txt\nb.txt")),
+  });
+  messages.push(...(await collect(claude({ messages, settings }))));
+  assert.deepEqual(sent[1].tools, [bash]);
+  assert.deepEqual(sent[1].messages.slice(1).map(blocks), [
+    "tool_use",
+    "tool_result",
+  ]);
+});
+
 // Must not compile: a provider-specific part with no provider name on it.
 export const illegal = (
   claude: ReturnType<typeof claudeWith>,
@@ -2104,6 +2433,37 @@ export const illegal = (
     settings: { anthropic: { ...options, output_config: { effort: "lowest" } } },
   });
   same(bare)({ messages: [], settings: { anthropic: options } });
+  // Anthropic's own tools go in its settings: those it runs, those the caller
+  // runs, and a whole family of them in one entry.
+  bare({
+    messages: [],
+    settings: {
+      anthropic: {
+        ...options,
+        tools: [
+          { type: "web_search_20260209", name: "web_search" },
+          { type: "bash_20250124", name: "bash" },
+          { type: "computer_toolset_20260801" },
+        ],
+      },
+    },
+  });
+  bare({
+    messages: [],
+    settings: {
+      anthropic: {
+        ...options,
+        // @ts-expect-error a tool of your own goes in the request's tools, never in the settings
+        tools: [{ name: "get_weather", description: "Weather.", input_schema: { type: "object" } }],
+      },
+    },
+  });
+  bare({
+    messages: [],
+    // @ts-expect-error and one of Anthropic's goes in the settings, never in the request's tools
+    tools: [{ type: "web_search_20260209", name: "web_search" }],
+    settings: { anthropic: options },
+  });
 };
 
 // ── Reasoning ───────────────────────────────────────────────────────────────
