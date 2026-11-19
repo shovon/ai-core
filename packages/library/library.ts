@@ -17,6 +17,9 @@ export type ReasoningPart = { type: "reasoning"; text: string };
  * A file, inline or by link. `data` is the bytes in standard base64 (RFC 4648,
  * with padding); `url` is where to fetch them. Both are strings, so a file
  * part is plain JSON like every other part.
+ *
+ * It may be given to a model, come back from a tool, or be made by a model. A
+ * provider whose model makes one emits it whole.
  */
 export type FilePart =
   | { type: "file"; mediaType: string; data: string }
@@ -26,6 +29,45 @@ export type ToolCall = {
   id: string;
   name: string;
   input: unknown;
+};
+/**
+ * The input of a tool call as the model writes it: its JSON text, in pieces.
+ * It is for showing, never for running or sending. The call itself still
+ * arrives whole, as a ToolCall with the same id, and takes the place of its
+ * pieces in a reply. Taking every tool-input part out of a history changes
+ * nothing that any provider sends.
+ *
+ * Every piece carries the id and name of its call. One with no text yet says
+ * only that the model has started writing the call. The text so far is a
+ * beginning of JSON, and need not be JSON itself.
+ */
+export type ToolInputPart = {
+  type: "tool_input";
+  id: string;
+  name: string;
+  text: string;
+};
+/**
+ * Where something the model said came from. It follows the text it supports:
+ * a source belongs to the text directly before it, and several in a row all
+ * support that same text.
+ *
+ * `span` says how much of that text: its last `span` characters, counted as a
+ * string's `length` counts them. With no `span` it is all of the text part
+ * before it. Text arrives in pieces and joins whatever text came before, so
+ * the span is what keeps a source to its own passage.
+ *
+ * `quote` is the passage relied on, `title` what it is from, and `url` where
+ * that is. Whatever else a provider knows of a source is in a field under the
+ * provider's name. A provider sends its own sources back with the text, if its
+ * API takes them, and leaves out everyone else's.
+ */
+export type SourcePart = {
+  type: "source";
+  span?: number;
+  quote?: string;
+  title?: string;
+  url?: string;
 };
 export type ToolResult = {
   type: "tool_result";
@@ -63,9 +105,28 @@ export type Usage = {
   cacheRead?: number;
   /** Of `input`, the tokens written to a cache. */
   cacheWrite?: number;
+  /** Of `output`, the tokens spent reasoning. Absent when the provider did not say. */
+  reasoning?: number;
 };
 
-export type End = { type: "end"; reason: Reason; usage?: Usage };
+/**
+ * What closes a turn: why it ended, what it cost, and what the provider said
+ * of its own response.
+ * - `id` is the provider's name for this response, the one to quote to it.
+ * - `model` is the model that answered, as the provider names it, which may
+ *   be more exact than the one asked for.
+ *
+ * It may also carry a field under its provider's name, holding whatever else
+ * that provider says of the response. `append` keeps every one of these on
+ * the turn, so a stored history holds them too. None of it is ever sent.
+ */
+export type End = {
+  type: "end";
+  reason: Reason;
+  usage?: Usage;
+  id?: string;
+  model?: string;
+};
 
 // ── History: who a message is from decides what it may contain ──────────────
 //
@@ -84,12 +145,19 @@ export type UserMessage<P extends Part> = {
 /**
  * `end` is why the turn finished; it is absent while the turn is still arriving.
  * `usage` is what the turn cost, when the provider reported it.
+ * `id` and `model` are the provider's name for the response and the model that
+ * gave it, when the provider said.
+ *
+ * A finished turn holds whatever else its End carried, such as a field under
+ * the provider's name. A provider reads only `content` when it sends a turn.
  */
 export type ModelMessage<P extends Part> = {
   from: "model";
   content: readonly P[];
   end?: Reason;
   usage?: Usage;
+  id?: string;
+  model?: string;
 };
 export type ToolMessage = { from: "tool"; content: readonly ToolResult[] };
 
@@ -102,10 +170,25 @@ export type AnyMessage = Message<Part, Part>;
 /**
  * A history that can be handed to any provider: the shared parts, plus any
  * provider's native parts inside model turns.
+ *
+ * A model turn may hold tool input whose call never arrived, because its
+ * stream stopped first. Like reasoning, it is kept for showing and never sent.
+ *
+ * A model turn may hold a file, when a model made one: an image it drew, say.
+ * It is what the model said, as its text is, so a provider sends it back if
+ * its API takes one there, and says so if it does not.
+ *
+ * A model turn may hold sources, each after the text it supports.
  */
 export type PortableMessage = Message<
   TextPart | FilePart,
-  TextPart | ReasoningPart | ToolCall | NativePart
+  | TextPart
+  | FilePart
+  | SourcePart
+  | ReasoningPart
+  | ToolCall
+  | ToolInputPart
+  | NativePart
 >;
 
 /** What one call produced: the messages to add to the history, in order. */
@@ -114,10 +197,19 @@ export type Reply<Out extends Part> = readonly (
   | ToolMessage
 )[];
 
+/**
+ * What the model is told of a tool. It may carry an extra field under one
+ * provider's name, holding that provider's own settings for the tool. Every
+ * other provider ignores the field and is told the same tool.
+ */
 export type ToolSpec = { name: string; description: string; schema: object };
-/** What an answer must be: JSON that fits this schema. `shape()` makes one that also reads the answer. */
+/** What an answer must be: JSON that fits this schema. `parse` checks one, once it is read as JSON. */
 export type ShapeSpec = { schema: object };
-export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
+export type Request<
+  M extends AnyMessage,
+  S extends TextPart = TextPart,
+  T extends ToolSpec = ToolSpec,
+> = {
   /**
    * Standing instructions for this call: one string, or text parts in order.
    * Parts concatenate exactly: a list means the same as its texts joined with
@@ -127,21 +219,31 @@ export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
   system?: string | readonly S[];
   messages: readonly M[];
   /** What the model may call. An empty list means the same as leaving it out: the model can call nothing. */
-  tools?: readonly ToolSpec[];
+  tools?: readonly T[];
   /**
-   * Asks for the final answer as JSON that fits a schema. The answer still
-   * arrives as text, for `shape().parse` to read. A provider that cannot ask
+   * Structured output: asks for the final answer as JSON that fits a schema.
+   * The answer still arrives as text, for `JSON.parse` and then `parse` to read. A provider that cannot ask
    * for this schema throws; one that does not know the field ignores it.
    */
   shape?: ShapeSpec;
-  /** Cancels the call. The stream then throws. Give the same signal to `runToolCall()` to cancel running tools. */
+  /** Cancels the call. The stream then throws. Tools are yours to run, so give them the same signal to cancel them too. */
   signal?: AbortSignal;
 };
 
 // ── The one port ────────────────────────────────────────────────────────────
 // Accepts messages of type In. Emits one or more turns: a turn is the model's
-// parts followed by one End. Text and reasoning arrive in pieces; every other
-// part is emitted whole.
+// parts followed by one End. Text, reasoning and tool input arrive in pieces;
+// every other part is emitted whole.
+//
+// A provider whose model says where its words came from emits a source
+// (SourcePart) directly after the text it supports, whole, with how much of
+// that text it speaks for.
+//
+// A provider may tell of a tool call while the model is still writing it: the
+// pieces of its input (ToolInputPart), one after another with nothing between
+// them, and then the call itself, whole, directly after. The call is what is
+// run and what is sent back; the pieces are only for showing. A provider that
+// tells nothing of the kind emits the call alone, and nothing else changes.
 //
 // Anything provider-specific travels as a NativePart carrying the provider's
 // name. A provider sends its own native parts back to its API and leaves out
@@ -151,6 +253,12 @@ export type Request<M extends AnyMessage, S extends TextPart = TextPart> = {
 // A shared part may carry extra fields meant for one provider, such as a
 // caching hint. A provider builds what it sends from the fields it knows and
 // ignores the rest; it never forwards a part whole.
+//
+// A tool may carry a field under one provider's name: that provider's own
+// settings for the tool. What sits under a provider's name is addressed to it
+// alone, so it may send that on as it is, and every setting its API has for a
+// tool stays in reach. What the tool is, its name, description and schema,
+// always comes from the tool itself.
 //
 // A tool call's id is whatever the provider that made the call chose, and it
 // must be unique within a history. Providers disagree about what an id may
@@ -187,6 +295,10 @@ export const isReasoning = (part: Part): part is ReasoningPart =>
   part.type === "reasoning";
 export const isToolCall = (part: Part): part is ToolCall =>
   part.type === "tool_call";
+export const isToolInput = (part: Part): part is ToolInputPart =>
+  part.type === "tool_input";
+export const isSource = (part: Part): part is SourcePart =>
+  part.type === "source";
 export const isToolResult = (part: Part): part is ToolResult =>
   part.type === "tool_result";
 export const isEnd = (part: Part): part is End => part.type === "end";
@@ -235,21 +347,39 @@ export const toolResult = (
 // ── Folding a stream into messages ──────────────────────────────────────────
 
 // The parts that arrive in pieces. A piece joins the part before it when that
-// is of the same kind; text never joins reasoning, nor reasoning text.
-const inPieces = (part: Part): part is TextPart | ReasoningPart =>
-  isText(part) || isReasoning(part);
+// is of the same kind; text never joins reasoning, nor reasoning text. Tool
+// input joins only the input of the same call.
+const inPieces = (
+  part: Part,
+): part is TextPart | ReasoningPart | ToolInputPart =>
+  isText(part) || isReasoning(part) || isToolInput(part);
+// The call a piece belongs to; text and reasoning belong to none.
+const callOf = (part: Part) => (isToolInput(part) ? part.id : undefined);
 
 const join = <P extends Part>(parts: readonly P[], part: P): readonly P[] => {
   const last = parts.at(-1);
-  return last && inPieces(last) && inPieces(part) && last.type === part.type
-    ? [...parts.slice(0, -1), { ...last, text: last.text + part.text }]
+  const before = parts.slice(0, -1);
+  // The whole call takes the place of the pieces of its input.
+  if (last && isToolInput(last) && isToolCall(part) && last.id === part.id)
+    return [...before, part];
+  return last &&
+    inPieces(last) &&
+    inPieces(part) &&
+    last.type === part.type &&
+    callOf(last) === callOf(part)
+    ? [...before, { ...last, text: last.text + part.text }]
     : [...parts, part];
 };
 
 /**
  * Add one chunk to a reply. Pure: returns a new reply.
  * A model part joins the turn still arriving, or starts a new one. An End
- * finishes that turn. A tool result joins the tool message in progress.
+ * finishes that turn, and all it carries is kept on it. A tool result joins
+ * the tool message in progress.
+ *
+ * A tool call takes the place of the tool input directly before it, when that
+ * is its own. So a stream that tells of each call's input as it is written
+ * comes to the same reply as one that does not.
  */
 export const append = <Out extends Part>(
   reply: Reply<Out>,
@@ -262,25 +392,13 @@ export const append = <Out extends Part>(
       ? [...rest, { from: "tool", content: [...last.content, chunk] }]
       : [...reply, { from: "tool", content: [chunk] }];
   const arriving = last?.from === "model" && !last.end ? last : undefined;
-  if (isEnd(chunk))
+  if (isEnd(chunk)) {
+    // Everything the End says goes on the turn: the reason as `end`, the rest as it is.
+    const { type, reason, ...said } = chunk;
     return arriving
-      ? [
-          ...rest,
-          {
-            ...arriving,
-            end: chunk.reason,
-            ...(chunk.usage && { usage: chunk.usage }),
-          },
-        ]
-      : [
-          ...reply,
-          {
-            from: "model",
-            content: [],
-            end: chunk.reason,
-            ...(chunk.usage && { usage: chunk.usage }),
-          },
-        ];
+      ? [...rest, { ...arriving, end: reason, ...said }]
+      : [...reply, { from: "model", content: [], end: reason, ...said }];
+  }
   return arriving
     ? [...rest, { ...arriving, content: join(arriving.content, chunk) }]
     : [...reply, { from: "model", content: [chunk] }];
@@ -320,7 +438,11 @@ export const text = async (stream: AsyncIterable<Part>): Promise<string> => {
     .join("");
 };
 
-/** What the model turns in a history cost, added up. A turn with no usage counts as nothing. */
+/**
+ * What the model turns in a history cost, added up. A turn with no usage
+ * counts as nothing, and so does a count a turn does not report: `reasoning`
+ * is then the least it can have been.
+ */
 export const totalUsage = (messages: readonly AnyMessage[]): Required<Usage> =>
   messages.reduce(
     (sum, message) => {
@@ -329,15 +451,17 @@ export const totalUsage = (messages: readonly AnyMessage[]): Required<Usage> =>
         output = 0,
         cacheRead = 0,
         cacheWrite = 0,
+        reasoning = 0,
       } = (message.from === "model" && message.usage) || {};
       return {
         input: sum.input + input,
         output: sum.output + output,
         cacheRead: sum.cacheRead + cacheRead,
         cacheWrite: sum.cacheWrite + cacheWrite,
+        reasoning: sum.reasoning + reasoning,
       };
     },
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
   );
 
 // ── For provider authors: ids another provider issued ──────────────────────
@@ -442,23 +566,15 @@ export const answerToolCalls = <M extends AnyMessage>(
     : put;
 };
 
-// ── Sugar: prompt with a bare string ────────────────────────────────────────
-
-// The provider must accept a plain text user message, whatever else it accepts.
-// The result takes the provider's own request type, R, so nothing it declares is lost.
-export const model =
-  <R extends Request<AnyMessage>, Out extends Part>(
-    provider: Takes<R, Out> & Provider<UserMessage<TextPart>, Out>,
-  ) =>
-  (input: string | R): AsyncIterable<Out | End> =>
-    typeof input === "string"
-      ? provider({ messages: [user(input)] })
-      : provider(input);
-
 // ── Tools: pieces for your own loop ─────────────────────────────────────────
 //
-// There is no loop here. A loop is the same call made again with a longer
-// history, so it is a few lines of your own:
+// Nothing here runs a tool, and there is no loop. A request says what the
+// model may call (ToolSpec), a reply holds what it called (ToolCall), and the
+// next request carries what came of each call (ToolResult). Those three are
+// what a provider has a say in. What a call does is your code.
+//
+// A loop is the same call made again with a longer history, so it is a few
+// lines of your own:
 //
 //   for (;;) {
 //     messages.push(...(await collect(provider({ messages, tools }))));
@@ -466,31 +582,38 @@ export const model =
 //     if (last?.from === "model" && last.end === "pause") continue;
 //     const calls = pendingToolCalls(messages);
 //     if (calls.length === 0) break;
-//     messages.push({ from: "tool", content: await Promise.all(calls.map((call) => runToolCall(tools, call))) });
+//     messages.push({ from: "tool", content: await Promise.all(calls.map(answer)) });
 //   }
+//
+// and so is `answer`, which makes the result of one call. `run` is whatever
+// you have that does what a call names:
+//
+//   const answer = async (call: ToolCall): Promise<ToolResult> => {
+//     try {
+//       return toolResult(call, await run(call));
+//     } catch (error) {
+//       if (isSchemaError(error)) throw error;
+//       signal?.throwIfAborted();
+//       return toolFailure(call, error);
+//     }
+//   };
 //
 // A paused turn is not an answer and asks for nothing: it goes back as it is.
 // A turn that was cut off may hold calls, the last of them perhaps half
 // written. They are not pending and are never run; the provider answers them
-// itself when the history is next sent. Logging a tool's failure, or letting
-// a mistake in its code stop the loop, is `runToolCall` written out with
-// `attemptToolCall`, `toolResult` and `toolFailure`. Running calls one at a
-// time, asking before one runs, and stopping after so many turns are all
-// changes to those lines.
-
-export type ToolContext = { signal?: AbortSignal };
-/** `input` is whatever the model sent. It is unchecked here; `tool()` builds one that checks it against its schema. */
-export type Tool = ToolSpec & {
-  run: (input: unknown, context: ToolContext) => Output | Promise<Output>;
-};
+// itself when the history is next sent. A call you cancelled is not something
+// for the model to read about, and neither is a mistake in a schema of yours,
+// so `answer` throws for those instead of making a result. What becomes of a call to a tool that is not there, which failures
+// the model reads and which stop the loop, running calls one at a time, asking
+// before one runs, and stopping after so many turns are all changes to those
+// lines.
 
 // ── Schemas: one description of a tool's input, or of an answer ─────────────
 //
 // A tool's schema is JSON Schema, because that is what a model is told. The
-// same schema gives `run` its input type (Infer) and is enforced before `run`
-// is called (tool), so the three cannot disagree. An answer's schema works the
-// same way (shape): told to the model, typing what `parse` returns, enforced
-// by `parse`. They read one subset:
+// same schema types the input of a call (Infer) and is what that input is
+// checked against (parse), so the three cannot disagree. An answer's schema
+// works the same way. They read one subset:
 //
 //   type (a single name), properties, required, additionalProperties (true or
 //   false), items, enum and const (of strings, numbers, booleans and null),
@@ -499,9 +622,10 @@ export type Tool = ToolSpec & {
 // A keyword constrains only the kind of value it is about, as JSON Schema
 // says: `minLength` says nothing of a number. description, title, default,
 // examples, $schema and $comment are for the reader and assert nothing. Any
-// other keyword is refused when the tool or shape is made, because the model
-// would be told something that is never enforced. A tool that needs more is a
-// `Tool` written out, with a `run` that checks its own input.
+// other keyword is refused when something is parsed against the schema,
+// because the model would be told something that is never enforced. That is a
+// mistake in the schema, not in what the model sent, and `isSchemaError` tells
+// the two apart. A tool that needs more has its input checked your own way.
 
 type Needed<S> = S extends { required: readonly (infer K)[] } ? K : never;
 type Flat<T> = { [K in keyof T]: T[K] };
@@ -510,8 +634,9 @@ type Flat<T> = { [K in keyof T]: T[K] };
  * The type of every value a schema accepts. Where the schema says more than
  * this can follow, the type is wider, never wrong.
  *
- * It reads the schema's literal types. Written inside `tool()` a schema keeps
- * them; held in a variable it needs `as const`, or the type is `unknown`.
+ * It reads the schema's literal types. Written where it is parsed against, a
+ * schema keeps them; held in a variable it needs `as const`, or the type is
+ * `unknown`.
  */
 export type Infer<S> = S extends { const: infer C }
   ? C
@@ -557,10 +682,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const isPlain = (value: unknown) =>
   value === null || ["string", "number", "boolean"].includes(typeof value);
 
-const named = (at: string) => at || "input";
+const named = (at: string) => at || "value";
 const within = (at: string, key: string) => (at ? `${at}.${key}` : key);
+// A mistake in a schema itself. It goes by its own name, so it can be told from what a model got wrong.
+const schemaError = (says: string) =>
+  Object.assign(new Error(`schema: ${says}`), { name: "SchemaError" });
 const malformed = (keyword: string, wants: string) =>
-  new Error(`schema: the keyword "${keyword}" must be ${wants}`);
+  schemaError(`the keyword "${keyword}" must be ${wants}`);
 
 const kinds: Record<
   string,
@@ -732,9 +860,9 @@ const notes = new Set([
   "$comment",
 ]);
 
-/** The check a schema stands for. Throws if the schema says anything that would go unenforced. */
+/** The check a schema stands for. Throws a schema error if the schema says anything that would go unenforced. */
 const checker = (schema: unknown): Check => {
-  if (!isRecord(schema)) throw new Error("schema: a schema must be an object");
+  if (!isRecord(schema)) throw schemaError("a schema must be an object");
   const checks = Object.entries(schema)
     .filter(([keyword]) => !notes.has(keyword))
     .map(([keyword, given]) => {
@@ -742,75 +870,241 @@ const checker = (schema: unknown): Check => {
         ? keywords[keyword]
         : undefined;
       if (!make)
-        throw new Error(
-          `schema: the keyword "${keyword}" is not one this enforces`,
-        );
+        throw schemaError(`the keyword "${keyword}" is not one this enforces`);
       return make(given, schema);
     });
   return (value, at) => checks.flatMap((check) => check(value, at));
 };
 
 /**
- * A tool whose input is checked against its schema before it runs, and typed
- * by it. Input that does not fit goes back to the model as an error result
- * that names everything wrong with it, so it can correct the call.
+ * Whether an error says that a schema cannot be enforced as it is written: it
+ * is malformed, or uses a keyword outside the subset. That is a mistake in the
+ * code that wrote the schema, never in what a model sent, so it is not for the
+ * model to read.
  *
- * Throws, when the tool is made, if the schema uses a keyword that would not
- * be enforced.
+ * It goes by the error's name, "SchemaError". Anything by that name will do,
+ * so it does not matter which copy of this library threw it.
  */
-export const tool = <const S extends object>(spec: {
-  name: string;
-  description: string;
-  schema: S;
-  run: (input: Infer<S>, context: ToolContext) => Output | Promise<Output>;
-}): Tool => {
-  const check = checker(spec.schema);
-  return {
-    name: spec.name,
-    description: spec.description,
-    schema: spec.schema,
-    run: (input, context) => {
-      const wrong = check(input, "");
-      if (wrong.length > 0) throw new Error(wrong.join("; "));
-      // Checked just above: the one place the schema's type is taken on trust.
-      return spec.run(input as Infer<S>, context);
-    },
-  };
-};
-
-/** A shape that also reads the answer it asked for. */
-export type Shape<T> = ShapeSpec & { parse: (answer: string) => T };
+export const isSchemaError = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "name" in error &&
+  error.name === "SchemaError";
 
 /**
- * The shape of an answer: one schema that is told to the model, types what
- * `parse` returns, and is enforced by `parse`. Give it to a request as `shape`
- * and read the reply with `parse(await text(...))`.
+ * A value, checked against a schema and typed by it. Throws unless the value
+ * fits the schema as it was given, naming everything wrong with it. Given back
+ * to the model, that lets it correct what it sent.
  *
- * `parse` throws unless the answer is JSON that fits the schema as it was
- * given, naming everything wrong with it. It is exact: a `null` where the
- * schema does not accept one is wrong, so a value that may be missing is best
- * written as required and either itself or null.
+ * It reads the input of a tool call, `parse(schema, call.input)`, and an
+ * answer that was asked for as a `shape`, `parse(schema, JSON.parse(answer))`.
+ * It is exact: a `null` where the schema does not accept one is wrong, so a
+ * value that may be missing is best written as required and either itself or
+ * null.
  *
- * Throws, when the shape is made, if the schema uses a keyword that would not
- * be enforced.
+ * Throws a schema error, whatever the value, if the schema uses a keyword that
+ * would not be enforced.
  */
-export const shape = <const S extends object>(schema: S): Shape<Infer<S>> => {
-  const check = checker(schema);
-  return {
-    schema,
-    parse: (answer) => {
-      let value: unknown;
-      try {
-        value = JSON.parse(answer);
-      } catch (cause) {
-        throw new Error("the answer is not JSON", { cause });
-      }
-      const wrong = check(value, "answer");
-      if (wrong.length > 0) throw new Error(wrong.join("; "));
-      // Checked just above: the one place the schema's type is taken on trust.
-      return value as Infer<S>;
-    },
+export const parse = <const S extends object>(
+  schema: S,
+  value: unknown,
+): Infer<S> => {
+  const wrong = checker(schema)(value, "");
+  if (wrong.length > 0) throw new Error(wrong.join("; "));
+  // Checked just above: the one place the schema's type is taken on trust.
+  return value as Infer<S>;
+};
+
+// ── JSON that is still being written ────────────────────────────────────────
+//
+// A tool call's input and an answer asked for in a shape both arrive as the
+// text of a JSON document, a piece at a time. Until the last piece, that text
+// is only the beginning of one, and JSON.parse has nothing to say of it.
+
+const escapes = new Map([
+  ['"', '"'],
+  ["\\", "\\"],
+  ["/", "/"],
+  ["b", "\b"],
+  ["f", "\f"],
+  ["n", "\n"],
+  ["r", "\r"],
+  ["t", "\t"],
+]);
+// A number, and every beginning of one.
+const numeral = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const numeralSoFar =
+  /^-?(?:(?:0|[1-9]\d*)(?:\.(?:\d+(?:[eE][+-]?\d*)?)?|[eE][+-]?\d*)?)?$/;
+
+/**
+ * The value that the beginning of a JSON document holds so far: what can be
+ * read of a tool call's input, or of an answer asked for in a shape, while it
+ * is still being written. It is for showing. Nothing checks it against a
+ * schema, and it may lack what the finished value must have, so it is
+ * `unknown`; the finished text is still read with `JSON.parse` and `parse`.
+ *
+ * - A whole document reads exactly as `JSON.parse` reads it.
+ * - A string still being written is there as far as it goes. Anything else
+ *   unfinished is left out until it is whole: a property with no value yet, a
+ *   number that may gain digits, half of `true`. With nothing to read yet,
+ *   the value is `undefined`.
+ * - It only grows. As text is added, strings get longer and objects and arrays
+ *   gain entries; nothing already there changes or goes away. The one
+ *   exception is a document that is a bare number, which is read as it stands.
+ * - Text that no JSON document begins with throws a SyntaxError, as
+ *   `JSON.parse` does.
+ */
+export const partial = (text: string): unknown => {
+  let at = 0;
+  const ended = () => at >= text.length;
+  const wrong = (where = at) =>
+    new SyntaxError(
+      `not the beginning of JSON: unexpected ${JSON.stringify(text[where])} at ${where}`,
+    );
+  const space = () => {
+    while (!ended() && " \t\n\r".includes(text[at]!)) at++;
   };
+
+  // Where plain text in a string stops: its end, an escape, or what may not be in one.
+  const stop = /["\\\u0000-\u001f]/g;
+  // A string as far as it is written, and whether its closing quote was reached.
+  const string = (): { said: string; whole: boolean } => {
+    at++;
+    let said = "";
+    for (;;) {
+      stop.lastIndex = at;
+      const to = stop.exec(text)?.index ?? text.length;
+      said += text.slice(at, to);
+      at = to;
+      if (ended()) return { said, whole: false };
+      if (text[at] === '"') {
+        at++;
+        return { said, whole: true };
+      }
+      if (text[at] !== "\\") throw wrong();
+      // An escape cut short says nothing yet.
+      const escape = text[at + 1];
+      if (escape === undefined) {
+        at = text.length;
+        return { said, whole: false };
+      }
+      if (escape === "u") {
+        const hex = text.slice(at + 2, at + 6);
+        if (!/^[0-9a-fA-F]*$/.test(hex)) throw wrong(at + 2);
+        if (hex.length < 4) {
+          at = text.length;
+          return { said, whole: false };
+        }
+        said += String.fromCharCode(parseInt(hex, 16));
+        at += 6;
+        continue;
+      }
+      const meant = escapes.get(escape);
+      if (meant === undefined) throw wrong(at + 1);
+      said += meant;
+      at += 2;
+    }
+  };
+
+  // A number is whole once something follows it. The document itself may be a
+  // number with nothing after it, and then it is read as it stands.
+  const number = (root: boolean): number | undefined => {
+    const from = at;
+    while (!ended() && "-+.eE0123456789".includes(text[at]!)) at++;
+    const seen = text.slice(from, at);
+    if (!ended() || root) {
+      if (numeral.test(seen)) return Number(seen);
+      if (!ended()) throw wrong(from);
+    }
+    if (!numeralSoFar.test(seen)) throw wrong(from);
+    return undefined;
+  };
+
+  const word = (name: string, value: unknown): unknown => {
+    const seen = text.slice(at, at + name.length);
+    if (!name.startsWith(seen)) throw wrong();
+    at += seen.length;
+    return seen === name ? value : undefined;
+  };
+
+  const array = (): unknown[] => {
+    at++;
+    const items: unknown[] = [];
+    space();
+    if (text[at] === "]") {
+      at++;
+      return items;
+    }
+    for (;;) {
+      space();
+      if (ended()) return items;
+      const item = value(false);
+      if (item !== undefined) items.push(item);
+      space();
+      if (ended()) return items;
+      if (text[at] === "]") {
+        at++;
+        return items;
+      }
+      if (text[at] !== ",") throw wrong();
+      at++;
+    }
+  };
+
+  const object = (): object => {
+    at++;
+    const entries: [string, unknown][] = [];
+    // As JSON.parse makes one: a name given twice keeps its place and its last value.
+    const made = () => Object.fromEntries(entries);
+    space();
+    if (text[at] === "}") {
+      at++;
+      return made();
+    }
+    for (;;) {
+      space();
+      if (ended()) return made();
+      if (text[at] !== '"') throw wrong();
+      const name = string();
+      if (!name.whole) return made();
+      space();
+      if (ended()) return made();
+      if (text[at] !== ":") throw wrong();
+      at++;
+      space();
+      if (ended()) return made();
+      const held = value(false);
+      if (held !== undefined) entries.push([name.said, held]);
+      space();
+      if (ended()) return made();
+      if (text[at] === "}") {
+        at++;
+        return made();
+      }
+      if (text[at] !== ",") throw wrong();
+      at++;
+    }
+  };
+
+  // Called only where there is text left. What is left out comes back undefined.
+  const value = (root: boolean): unknown => {
+    const first = text[at]!;
+    if (first === "{") return object();
+    if (first === "[") return array();
+    if (first === '"') return string().said;
+    if (first === "t") return word("true", true);
+    if (first === "f") return word("false", false);
+    if (first === "n") return word("null", null);
+    if (first === "-" || (first >= "0" && first <= "9")) return number(root);
+    throw wrong();
+  };
+
+  space();
+  if (ended()) return undefined;
+  const read = value(true);
+  space();
+  if (!ended()) throw wrong();
+  return read;
 };
 
 // ── For provider authors: a schema as one API takes it ─────────────────────
@@ -887,21 +1181,6 @@ export const pendingToolCalls = (
     : [];
 };
 
-/**
- * Run one call and give back what the tool returned. Throws if there is no
- * such tool, and throws whatever the tool throws, as it was thrown: bad input,
- * a failure of the tool's own, and a mistake in its code all arrive here.
- */
-export const attemptToolCall = async (
-  tools: readonly Tool[],
-  call: ToolCall,
-  signal?: AbortSignal,
-): Promise<Output> => {
-  const found = tools.find((t) => t.name === call.name);
-  if (!found) throw new Error(`unknown tool: ${call.name}`);
-  return found.run(call.input, { signal });
-};
-
 // What went wrong, in the thrower's own words. Anything with a `message` will do, so an error from elsewhere reads the same.
 const told = (error: unknown): string =>
   typeof error === "object" &&
@@ -915,25 +1194,3 @@ const told = (error: unknown): string =>
 /** The error result for a call that failed: what the model reads of the failure. */
 export const toolFailure = (call: ToolCall, error: unknown): ToolResult =>
   toolResult(call, told(error), { error: true });
-
-/**
- * Run one call. A missing or throwing tool becomes an error result. If the
- * signal was aborted, the failure is thrown instead: a cancelled call is not
- * something for the model to read about.
- *
- * It is `attemptToolCall`, with `toolResult` for what comes back and
- * `toolFailure` for what is thrown. To see a failure before the model does,
- * put the three together yourself.
- */
-export const runToolCall = async (
-  tools: readonly Tool[],
-  call: ToolCall,
-  signal?: AbortSignal,
-): Promise<ToolResult> => {
-  try {
-    return toolResult(call, await attemptToolCall(tools, call, signal));
-  } catch (error) {
-    signal?.throwIfAborted();
-    return toolFailure(call, error);
-  }
-};

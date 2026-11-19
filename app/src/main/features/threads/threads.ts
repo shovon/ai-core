@@ -3,17 +3,21 @@
 import {
   append,
   collect,
+  isSchemaError,
   isText,
   isToolCall,
+  isToolInput,
   pendingToolCalls,
+  toolFailure,
   toolResult,
-  runToolCall,
   user,
+  type Output,
   type PortableMessage,
   type Provider,
   type Reply,
-  type Tool,
+  type ToolCall,
   type ToolResult,
+  type ToolSpec,
 } from "@ai-agent-library/library";
 import { path, type Tree } from "@ai-agent-library/tree";
 import type {
@@ -44,6 +48,16 @@ export type ThreadStore = {
    * and a parent that is not in this one.
    */
   addItem(thread: string, item: Item): Promise<void>;
+};
+
+/**
+ * Something the model may call while it answers: what the model is told of
+ * it, and what a call to it does. The call's input is whatever the model sent,
+ * so `run` checks it. What `run` throws is told to the model. The signal is
+ * aborted if the answer is stopped.
+ */
+export type Tool = ToolSpec & {
+  run: (call: ToolCall, signal: AbortSignal) => Output | Promise<Output>;
 };
 
 export type Ports = {
@@ -122,14 +136,17 @@ const readable = (message: PortableMessage) =>
   message.from === "model" && message.content.some(isText);
 
 /**
- * A stopped turn without the calls it made. They were never run, and a call
- * left in a history with no result after it cannot be sent to the model again.
+ * A stopped turn without the calls it made, or the input of one it was still
+ * writing. They were never run, and a call left in a history with no result
+ * after it cannot be sent to the model again.
  */
 const uncalled = (message: PortableMessage): PortableMessage =>
   message.from === "model"
     ? {
         ...message,
-        content: message.content.filter((part) => !isToolCall(part)),
+        content: message.content.filter(
+          (part) => !isToolCall(part) && !isToolInput(part),
+        ),
       }
     : message;
 
@@ -273,11 +290,23 @@ export const createThreads = ({
         await unrun("Not run: too many rounds of tool calls in one answer.");
         throw new Error(`stopped after ${TOOL_ROUNDS} rounds of tool calls`);
       }
+      // What one call comes to. A tool that is not there, input that does not fit and a failure are all
+      // told to the model. A call that was stopped is not: it throws, and no result is made up for it.
+      // Nor is a schema that cannot be enforced, which is a mistake in the tool and fails the answer.
+      const resultOf = async (call: ToolCall): Promise<ToolResult> => {
+        try {
+          const called = tools.find((tool) => tool.name === call.name);
+          if (!called) throw new Error(`unknown tool: ${call.name}`);
+          return toolResult(call, await called.run(call, signal));
+        } catch (error) {
+          if (isSchemaError(error)) throw error;
+          signal.throwIfAborted();
+          return toolFailure(call, error);
+        }
+      };
       let results: readonly ToolResult[];
       try {
-        results = await Promise.all(
-          calls.map((call) => runToolCall(tools, call, signal)),
-        );
+        results = await Promise.all(calls.map(resultOf));
       } catch (error) {
         if (!signal.aborted) throw error;
         // Stopped while the tools ran.

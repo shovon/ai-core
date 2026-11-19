@@ -20,12 +20,12 @@ The second argument is anything Anthropic's `messages.stream` accepts, except `m
 ## Ask once
 
 ```ts
-import { model, text } from "@ai-agent-library/library";
+import { text, user } from "@ai-agent-library/library";
 
-const answer = await text(model(provider)("Write a haiku about rain."));
+const answer = await text(provider({ messages: [user("Write a haiku about rain.")] }));
 ```
 
-`model` turns a bare string into a request. `text` reads the stream to its end and returns the answer. It throws unless the model finished, so a reply that was cut off or refused never comes back looking like an answer.
+`user` makes a message from a bare string. `text` reads the stream to its end and returns the answer. It throws unless the model finished, so a reply that was cut off or refused never comes back looking like an answer.
 
 A request can also carry standing instructions:
 
@@ -62,6 +62,34 @@ for await (const chunk of provider({ messages: [user("Tell me a story.")] })) {
 
 `collect` is the same fold run to the end: it returns every message the stream produced.
 
+A provider may also tell of a tool call while the model is still writing it. The input then arrives as `tool_input` parts, and `isToolInput` picks them out.
+
+```ts
+import { isText, isToolInput, user } from "@ai-agent-library/library";
+
+for await (const chunk of provider({ messages: [user("What does package.json depend on?")], tools })) {
+  if (isText(chunk)) process.stdout.write(chunk.text);
+  if (isToolInput(chunk)) process.stdout.write(chunk.text === "" ? `\n${chunk.name}: ` : chunk.text);
+}
+```
+
+- Each piece carries the id and name of its call, and a piece of the input's JSON text. The first has no text: it says only that the call has begun.
+- The text so far is a beginning of JSON and need not be JSON itself. It is for showing, and `partial` reads what it holds so far (see [Read JSON as it is written](#read-json-as-it-is-written)).
+- The call still arrives whole, directly after its pieces. It is the call that is run.
+- `append` joins the pieces of one call into one part, and the call takes that part's place when it arrives. So `collect` returns the same history whether a provider tells of the input or not.
+- A stream that stops in the middle of a call leaves its input behind in the turn. Kept in a history, it is shown and never sent.
+
+The Anthropic provider does this for every tool you define. Anthropic may hold a call's input back and send it in a few large pieces; to have it sent as the model writes it, set `eager_input_streaming` on the tool:
+
+```ts
+const writeFileTool = {
+  name: "write_file",
+  description: "Write a UTF-8 text file.",
+  schema: { type: "object", properties: { path: { type: "string" }, text: { type: "string" } }, required: ["path", "text"] },
+  anthropic: { eager_input_streaming: true },
+} as const satisfies AnthropicTool;
+```
+
 ## Keep a conversation
 
 The history is an array of messages, and it is the whole state. To continue, add to it and call again.
@@ -81,39 +109,70 @@ await writeFile("thread.json", JSON.stringify(messages));
 const loaded: AnthropicMessage[] = JSON.parse(await readFile("thread.json", "utf8"));
 ```
 
-A message is from `"user"`, `"model"` or `"tool"`, and who it is from decides what it may contain. A model message records why its turn ended (`end`) and what it cost (`usage`).
+A message is from `"user"`, `"model"` or `"tool"`, and who it is from decides what it may contain. A model message records why its turn ended (`end`), what it cost (`usage`), and what the provider said of the response (`id`, `model` and more).
 
 ## Give the model tools
 
-A tool is a name, a description, a JSON Schema for its input, and a function. The one schema is told to the model, types the input of `run`, and is checked before `run` is called.
+To the library, a tool is plain data: a name, a description and a JSON Schema for its input. That is what the model is told. What a call does is your code. The library never runs a tool.
 
 ```ts
-import { readFile } from "node:fs/promises";
-import { tool } from "@ai-agent-library/library";
+import type { ToolSpec } from "@ai-agent-library/library";
 
-const tools = [
-  tool({
-    name: "read_file",
-    description: "Read a UTF-8 text file.",
-    schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-    run: ({ path }) => readFile(path, "utf8"),
-  }),
-];
+const readFileTool = {
+  name: "read_file",
+  description: "Read a UTF-8 text file.",
+  schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+} as const satisfies ToolSpec;
+const tools = [readFileTool];
 ```
 
-- Input that does not fit the schema goes back to the model as an error naming everything wrong with it, so it can correct the call.
-- The schema may use `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `minLength`, `maxLength`, `minimum`, `maximum`, `minItems` and `maxItems`. Any other keyword that asserts something is refused when the tool is made, because it would be told to the model and never enforced.
-- A schema held in a variable needs `as const` to type the input; written inside `tool()` it does not.
-- `run` returns a string, or text and file parts in order. It receives `{ signal }` as its second argument.
-- For a schema outside that subset, write the `Tool` object out yourself, with a `run` that checks its own input.
+When the model calls one, `parse(schema, call.input)` reads the call's input. The one schema is told to the model, types what `parse` returns, and is what the input is checked against.
+
+- It throws unless the input fits the schema, naming everything wrong with it. Given to the model as an error result, that lets it correct the call.
+- The schema may use `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, `const`, `anyOf`, `minLength`, `maxLength`, `minimum`, `maximum`, `minItems` and `maxItems`. Any other keyword that asserts something is a mistake in the schema, because it would be told to the model and never enforced. `parse` then throws a schema error whatever the input, and `isSchemaError` tells it from what a model got wrong.
+- A schema held in a variable needs `as const` to type the input, as above.
+- For a schema outside that subset, check the input your own way.
 
 ## The loop
 
-There is no agent loop in the library. A loop is the same call made again with a longer history:
+There is no agent loop in the library. A loop is the same call made again with a longer history, and running the tools is part of it:
 
 ```ts
-import { collect, isText, pendingToolCalls, runToolCall, user } from "@ai-agent-library/library";
+import { readFile } from "node:fs/promises";
+import {
+  collect,
+  isSchemaError,
+  isText,
+  parse,
+  pendingToolCalls,
+  toolFailure,
+  toolResult,
+  user,
+  type ToolCall,
+  type ToolResult,
+} from "@ai-agent-library/library";
 import type { AnthropicMessage } from "@ai-agent-library/providers/anthropic";
+
+// What each call does: a switch here, but a table of functions or a queue would do.
+const run = async (call: ToolCall) => {
+  switch (call.name) {
+    case "read_file":
+      return readFile(parse(readFileTool.schema, call.input).path, "utf8");
+    default:
+      throw new Error(`unknown tool: ${call.name}`);
+  }
+};
+
+// The result of one call. What was thrown becomes an error the model reads,
+// unless it is a mistake in a schema of yours, which the model can do nothing about.
+const answer = async (call: ToolCall): Promise<ToolResult> => {
+  try {
+    return toolResult(call, await run(call));
+  } catch (error) {
+    if (isSchemaError(error)) throw error;
+    return toolFailure(call, error);
+  }
+};
 
 const messages: AnthropicMessage[] = [user("What does package.json depend on?")];
 
@@ -123,7 +182,7 @@ for (;;) {
   if (last?.from === "model" && last.end === "pause") continue;
   const calls = pendingToolCalls(messages);
   if (calls.length === 0) break;
-  messages.push({ from: "tool", content: await Promise.all(calls.map((call) => runToolCall(tools, call))) });
+  messages.push({ from: "tool", content: await Promise.all(calls.map(answer)) });
 }
 
 const final = messages.at(-1);
@@ -132,7 +191,8 @@ console.log(final.content.filter(isText).map((part) => part.text).join(""));
 ```
 
 - `pendingToolCalls` returns the tool calls in a final, finished model turn. When it returns none, the loop is over.
-- `runToolCall` runs one call. A missing tool, bad input or a thrown error becomes an error result the model reads, so the loop keeps going.
+- `toolResult` makes the result of a call from a string, or from text and file parts in order. `toolFailure` makes an error result from whatever was thrown, in the thrower's own words.
+- Here a missing tool, bad input and a thrown error all become an error result the model reads, so the loop keeps going. A schema the library cannot enforce stops it. Both are `answer`'s choice, and so yours.
 - A paused turn is unfinished and asks for nothing: it goes back as it is.
 - The loop also ends on a turn that was cut off or refused. Only `end === "stop"` means there is an answer, so check it after the loop.
 
@@ -164,39 +224,36 @@ for (let requests = 0; ; requests++) {
 Ask before a call runs, and run calls one at a time:
 
 ```ts
-import { runToolCall, toolResult, type ToolResult } from "@ai-agent-library/library";
-
 const results: ToolResult[] = [];
 for (const call of calls) {
   const allowed = call.name !== "delete_file" || (await confirm(call));
-  results.push(allowed ? await runToolCall(tools, call) : toolResult(call, "The user said no.", { error: true }));
+  results.push(allowed ? await answer(call) : toolResult(call, "The user said no.", { error: true }));
 }
 messages.push({ from: "tool", content: results });
 ```
 
-See a failure before the model does. `runToolCall` is `attemptToolCall`, with `toolResult` for what comes back and `toolFailure` for what is thrown:
+See a failure before the model does, and let a mistake in your own code stop the loop:
 
 ```ts
-import { attemptToolCall, toolFailure, toolResult, type ToolCall } from "@ai-agent-library/library";
-
-const watched = async (call: ToolCall) => {
+const answer = async (call: ToolCall): Promise<ToolResult> => {
   try {
-    return toolResult(call, await attemptToolCall(tools, call));
+    return toolResult(call, await run(call));
   } catch (error) {
     console.error(call.name, error);
+    if (isSchemaError(error) || error instanceof TypeError) throw error;
     return toolFailure(call, error);
   }
 };
 ```
 
-## Ask for a typed answer
+## Structured outputs
 
-A shape is a JSON Schema for the answer. The one schema is told to the model, types what `parse` returns, and is checked by `parse`.
+To get the answer as JSON that fits a schema, which vendors call structured outputs, put the schema on the request as `shape`. It is plain data. The answer comes back as text: `JSON.parse` reads it, and `parse(schema, value)`, the same function that reads a tool call's input, checks it and types it. The one schema is told to the model, types what `parse` returns, and is what the answer is checked against.
 
 ```ts
-import { shape, text, user } from "@ai-agent-library/library";
+import { parse, text, user } from "@ai-agent-library/library";
 
-const triage = shape({
+const triage = {
   type: "object",
   properties: {
     category: { enum: ["billing", "bug", "other"] },
@@ -205,20 +262,21 @@ const triage = shape({
   },
   required: ["category", "urgent", "orderId"],
   additionalProperties: false,
-});
+} as const;
 
-const ticket = triage.parse(
-  await text(provider({ system: "Triage the support ticket.", messages: [user(email)], shape: triage })),
+const ticket = parse(
+  triage,
+  JSON.parse(await text(provider({ system: "Triage the support ticket.", messages: [user(email)], shape: { schema: triage } }))),
 );
 // ticket: { category: "billing" | "bug" | "other"; urgent: boolean; orderId: string | null }
 ```
 
-- The answer is ordinary text that happens to be JSON. It streams, ends and is stored like any other answer, so `parse` reads one from a stored history just as well.
-- `parse` throws unless the text is JSON that fits the schema as you wrote it, and the error names everything wrong. Sending that back to the model and asking again is your loop.
+- The answer is ordinary text that happens to be JSON. It streams, ends and is stored like any other answer, so one from a stored history reads just the same.
+- `parse` throws unless the value fits the schema as you wrote it, and the error names everything wrong. Text that is not JSON throws from `JSON.parse` before that. Sending either back to the model and asking again is your loop.
 - `parse` is exact about `null`: where the schema does not accept one, it is wrong.
-- The schema uses the same keywords as a tool's. Any other keyword that asserts something is refused when the shape is made.
+- The schema uses the same keywords as a tool's, and needs `as const` to type the answer. Any other keyword that asserts something makes `parse` throw a schema error, whatever the answer.
 - A shape and tools go in one request. The model calls its tools first, and its final answer is the JSON.
-- A call can fail in three places. The stream throws if the request fails or the provider cannot ask for the schema, `text` throws if the turn did not finish, and `parse` throws if the answer does not fit.
+- A call can fail in three places. The stream throws if the request fails or the provider cannot ask for the schema, `text` throws if the turn did not finish, and `JSON.parse` or `parse` throws if the answer is not JSON or does not fit.
 
 Vendors take different schemas. One written this way can be asked of any of them:
 
@@ -232,6 +290,42 @@ Nothing enforces that style. Each provider sends what its vendor takes and refus
 - Closes every object, as Anthropic requires. The model then writes only the properties you listed.
 - Refuses an open object with no listed properties, because Anthropic could only answer `{}` for it.
 
+## Read JSON as it is written
+
+A tool call's input and an answer asked for in a shape both arrive as the text of a JSON document, a piece at a time. `partial` reads what the text holds so far, where `JSON.parse` would throw until the last piece.
+
+```ts
+import { isText, partial, user } from "@ai-agent-library/library";
+
+let written = "";
+for await (const chunk of provider({ messages: [user(email)], shape: { schema: triage } })) {
+  if (!isText(chunk)) continue;
+  written += chunk.text;
+  render(partial(written)); // {} then { category: "bil" } then { category: "billing", urgent: true } ...
+}
+const ticket = parse(triage, JSON.parse(written));
+```
+
+For a tool call, fold the stream with `append` and read the one `tool_input` part as it grows:
+
+```ts
+import { append, isToolInput, partial, type Reply } from "@ai-agent-library/library";
+
+let reply: Reply<AnthropicOut> = [];
+for await (const chunk of provider({ messages, tools })) {
+  reply = append(reply, chunk);
+  const part = reply.at(-1)?.content.at(-1);
+  if (part && isToolInput(part)) render(part.name, partial(part.text)); // { path: "rain.txt", text: "Soft rain on" }
+}
+```
+
+- A whole document reads exactly as `JSON.parse` reads it.
+- A string still being written is there as far as it goes. Anything else unfinished is left out until it is whole: a property with no value yet, a number that may gain digits, half of `true`. With nothing to read yet, the value is `undefined`.
+- It only grows. As text arrives, strings get longer and objects and arrays gain entries; nothing already there changes or goes away. The one exception is a document that is a bare number, which is read as it stands.
+- Text that no JSON document begins with throws a `SyntaxError`, as `JSON.parse` does.
+- The value is `unknown`. Nothing checks it against a schema, and it may lack what the finished value must have. It is for showing: the finished text is still read with `JSON.parse` and `parse`.
+- It reads the text from its start each time. That is quick, but for a very long document read it less often than every piece.
+
 ## Files
 
 `file` makes a part from bytes or from a link. Bytes are kept as base64, so the part stays plain JSON.
@@ -243,23 +337,148 @@ import { file, text, user } from "@ai-agent-library/library";
 const seen = await text(provider({ messages: [user("What is in this picture?", file("image/png", await readFile("cat.png")))] }));
 ```
 
-The Anthropic provider sends JPEG, PNG, GIF and WebP images and PDFs. Any other type is an error, never a silent drop.
+The Anthropic provider sends JPEG, PNG, GIF and WebP images, PDFs and plain text files. Any other type is an error, never a silent drop. A text file goes as the text itself, so it cannot be given by link.
+
+A file may carry Anthropic's own settings for it, in a field under Anthropic's name: every one its API has for a document, such as `citations`, `title`, `context` and `cache_control`. On a PDF or a text file they are sent as they are. An image takes only `cache_control`.
+
+### A link the provider cannot follow
+
+A file given by link is fetched by the vendor, not by you. That fails when the link is private, local or needs credentials, and some files cannot be given by link at all: Anthropic takes a text file only as its text. The library does no fetching. Fetch the file yourself and give its bytes:
+
+```ts
+import { file, user, type FilePart, type TextPart, type UserMessage } from "@ai-agent-library/library";
+
+// A linked file as its bytes. Everything else about the part is kept, a hint included.
+const fetched = async (part: FilePart & { url: string }, get: typeof fetch): Promise<FilePart> => {
+  const response = await get(part.url);
+  if (!response.ok) throw new Error(`could not fetch ${part.url}: ${response.status}`);
+  const { url, ...rest } = part;
+  return { ...rest, ...file(part.mediaType, new Uint8Array(await response.arrayBuffer())) };
+};
+
+// A user message with every linked file fetched.
+const inlined = async (
+  message: UserMessage<TextPart | FilePart>,
+  get: typeof fetch = fetch,
+): Promise<UserMessage<TextPart | FilePart>> => ({
+  ...message,
+  content: await Promise.all(
+    message.content.map((part) => (part.type === "file" && "url" in part ? fetched(part, get) : part)),
+  ),
+});
+
+messages.push(await inlined(user(file("application/pdf", new URL("http://localhost:8080/report.pdf")), "Summarise.")));
+```
+
+- Done once, as here, the history holds the bytes: it is larger, and the file is fetched one time.
+- To keep the link in the history, do the same to a copy of the messages each time you call the provider. The history stays small and the file is fetched on every request.
+- `get` is whatever fetches for you, so it can add credentials, and a test can pass a fake.
+
+### Files a model makes
+
+A model turn may hold a file too, where a provider's model makes one, such as an image it drew. It arrives whole, as a `file` part among the turn's other parts, and a portable history keeps it.
+
+- Claude does not write files into its turns, so the Anthropic provider never yields one.
+- Handed a history in which another model did, the Anthropic provider sends the file as it sends any other. Whether a file may sit in a model turn is Anthropic's to say, and its API's error is what tells you.
+
+## Sources
+
+A model can say where its words came from. Such a source is a part of the turn, directly after the text it supports.
+
+With Anthropic, a document is cited only if it was sent with citations switched on:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { collect, file, isSource, isText, user } from "@ai-agent-library/library";
+import type { AnthropicMessage } from "@ai-agent-library/providers/anthropic";
+
+const report = {
+  ...file("application/pdf", await readFile("report.pdf")),
+  anthropic: { citations: { enabled: true }, title: "Q3 report" },
+};
+const messages: AnthropicMessage[] = [user(report, "What drove the margin change?")];
+messages.push(...(await collect(provider({ messages }))));
+```
+
+The turn then reads:
+
+```ts
+[
+  { type: "text", text: "Margins fell, mainly on freight." },
+  { type: "source", span: 18, quote: "Freight expense rose 31%.", title: "Q3 report", anthropic: { type: "page_location", start_page_number: 4, /* … */ } },
+  { type: "text", text: " Pricing was flat." },
+]
+```
+
+- A source belongs to the text directly before it. Several in a row all support that same text.
+- `span` says how much of that text: its last `span` characters, counted as a string's `length` counts them. Here that is `"mainly on freight."`. Text joins whatever text came before it, so the part before a source may begin with words the source says nothing of. With no `span`, a source speaks for the whole text part before it.
+- `quote` is the passage relied on, `title` what it is from, and `url` where that is, when it is on the web. `isSource` picks a source out.
+- Whatever else a provider knows is in a field under its name. With Anthropic it is the citation as its API gave it: the document, and the pages or characters cited.
+- A source is no part of the answer: `text` leaves it out.
+- The Anthropic provider sends its own sources back, as citations on the passage they support, and leaves out every other provider's.
+
+To show them, walk the turn:
+
+```ts
+for (const [i, part] of turn.content.entries()) {
+  if (isText(part)) write(part.text);
+  if (isSource(part)) footnote(part.title, part.quote); // supports the end of the text just before it
+}
+```
 
 ## Reasoning and cost
 
 - A `reasoning` part is what the model says of its own working. It is for showing and is never sent back; `isReasoning` picks it out. With Anthropic, pass `thinking: { type: "adaptive", display: "summarized" }` to the provider to receive its text.
-- `totalUsage(messages)` adds up what the model turns in a history cost: `input`, `output`, `cacheRead` and `cacheWrite` tokens.
+- `totalUsage(messages)` adds up what the model turns in a history cost: `input`, `output`, `cacheRead`, `cacheWrite` and `reasoning` tokens.
+- `reasoning` is the part of `output` spent reasoning, never a count beside it. A turn carries it only when the provider says how much it was; in a total, a turn that does not say counts as none.
+- What a provider counts beyond these is in its own account of the response, under its name on the turn. With Anthropic that is `turn.anthropic?.usage`: the cache split by lifetime, server tool requests, the service tier.
+
+## What the provider said of a response
+
+A finished model turn also holds what the provider said of the response that made it.
+
+```ts
+const messages: AnthropicMessage[] = [user("Count to three.")];
+messages.push(...(await collect(provider({ messages }))));
+
+const turn = messages.at(-1);
+if (turn?.from === "model") {
+  turn.id; // "msg_01…": the provider's name for this response
+  turn.model; // the model that answered, as the provider names it
+  turn.anthropic?.request_id; // the request's id, to quote to Anthropic
+  turn.anthropic?.stop_sequence; // which stop sequence matched, if one did
+  turn.anthropic?.usage; // usage as Anthropic counts it, with all its detail
+}
+```
+
+- `id` and `model` are shared: every provider that knows them says them the same way.
+- Everything else a provider says is in a field under its name. With Anthropic it is the message as its API ended it, without the content, plus `request_id`. It is the API's own object, so a field Anthropic adds later arrives with a newer SDK.
+- All of it comes on the `end` chunk that closes the turn, and `append` keeps whatever an `end` carries on the turn. So it is in a stored history too, as plain JSON.
+- None of it is ever sent. A provider reads only a turn's content.
+- Typed as `AnthropicMessage`, a turn's `anthropic` field is typed. In a history typed more widely it is there all the same, for you to narrow.
+- Response headers are not kept. To see them, give the vendor's client a `fetch` of your own.
 
 ## Cancelling
 
-Give one signal to the provider and to `runToolCall`. A cancelled request makes the stream throw, and a cancelled tool call throws instead of becoming a result.
+Give one signal to the provider and to whatever runs your tools. A cancelled request makes the stream throw. Have a cancelled call throw too: made into a result, it would tell the model of a failure that was your decision.
 
 ```ts
 const controller = new AbortController();
 const { signal } = controller;
 
+// `run` takes the signal here, and hands it to whatever it does that can be stopped.
+const answer = async (call: ToolCall): Promise<ToolResult> => {
+  try {
+    return toolResult(call, await run(call, signal));
+  } catch (error) {
+    if (isSchemaError(error)) throw error;
+    signal.throwIfAborted();
+    return toolFailure(call, error);
+  }
+};
+
 messages.push(...(await collect(provider({ messages, tools, signal }))));
-const results = await Promise.all(pendingToolCalls(messages).map((call) => runToolCall(tools, call, signal)));
+const results = await Promise.all(pendingToolCalls(messages).map(answer));
 ```
 
 ## Caching with Anthropic
@@ -274,6 +493,31 @@ const reply = provider({
 ```
 
 For automatic caching, pass `cache_control: { type: "ephemeral" }` in the provider's options instead.
+
+## Tool settings for Anthropic
+
+A tool may carry Anthropic's own settings for it, in a field under Anthropic's name.
+
+```ts
+import type { AnthropicTool } from "@ai-agent-library/providers/anthropic";
+
+const readFileTool = {
+  name: "read_file",
+  description: "Read a UTF-8 text file.",
+  schema: {
+    type: "object",
+    properties: { path: { type: "string" } },
+    required: ["path"],
+    additionalProperties: false,
+  },
+  anthropic: { strict: true, cache_control: { type: "ephemeral" } },
+} as const satisfies AnthropicTool;
+```
+
+- The field takes every setting Anthropic's API has for a tool you define, among them `strict`, `cache_control`, `eager_input_streaming`, `input_examples`, `defer_loading` and `allowed_callers`. It is sent as it is, so a setting Anthropic adds later needs nothing from the provider but a newer SDK for its type.
+- What the tool is comes from the tool: its name, description and schema cannot be set in the field.
+- Every other provider ignores the field and is told the same tool. `parse(readFileTool.schema, call.input)` reads a call's input as before.
+- A tool's schema is sent as you wrote it. It is not fitted the way a shape's is, so where a setting narrows what Anthropic takes, its API is what says so.
 
 ## Write a provider
 
@@ -292,15 +536,21 @@ const said = await text(canned({ messages: [user("Hi.")] })); // "Hello."
 
 For a real one:
 
-- Text and reasoning may be yielded in pieces. Every other part is yielded whole.
+- Text, reasoning and tool input may be yielded in pieces. Every other part is yielded whole.
+- To tell of a tool call as it is written, yield `tool_input` parts for it, one after another with nothing between them, and then the call itself directly after. The call is still yielded whole, and the pieces are yours to leave out.
+- A history may hold `tool_input` parts whose call never arrived. Leave them out of what you send, as you do reasoning.
+- If your model says where its words came from, yield a `source` part directly after the text it supports, whole, with a `span`: the length of that text as you yielded it. Put what only your API knows of it in a field under your provider's name. Send your own sources back if your API takes them, and leave out everyone else's.
+- A file may carry a field under your provider's name, holding your API's own settings for it. Read it on a file in a message, not on one inside a tool result.
 - Anything only your API understands travels as a `native` part carrying your provider's name. Send your own native parts back and leave out everyone else's, so one history can pass between providers.
+- Close each turn with an `end` chunk. Besides the reason and usage, say the response's `id` and `model` if your API gives them, and put whatever else it says of the response in a field under your provider's name. Keep it plain JSON, with nothing undefined in it, and leave the content out. `append` keeps all of it on the turn.
 - Build what you send from the fields you know. Never forward a part whole.
+- A tool may carry a field under your provider's name, holding your API's own settings for it. It is addressed to you alone, so you may send it as it is. Take the tool's name, description and schema from the tool itself, after the field, so nothing in it can replace them. Ignore a field under any other name.
 - `fitToolIds` rewrites tool-call ids your API cannot accept, and `answerToolCalls` gives a result to any call that has none. Both return a copy and leave the history as it was.
 - A request may carry a `shape`. Send its schema in the form your API takes: `fitSchema` takes every schema inside it, innermost first, through a function of yours, and returns a copy.
   - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
   - Never send a schema whose answers you would have to rewrite on the way back. Throw instead, saying where. Throw too if your API cannot ask for a shape at all.
   - Give the same output for the same schema every time.
-- A provider that does not know a request field ignores it. One written before `shape` existed lets the model answer in prose, and the caller's `parse` reports text that is not JSON. A scripted provider in a test can return canned JSON for the same reason.
+- A provider that does not know a request field ignores it. One written before `shape` existed lets the model answer in prose, and the caller's `JSON.parse` reports text that is not JSON. A scripted provider in a test can return canned JSON for the same reason.
 
 Code that only needs text can ask for the narrowest provider, and any richer one fits:
 
@@ -314,6 +564,7 @@ const summarise = (provider: Provider<UserMessage<TextPart>, Part>) => (document
 ## What is not here
 
 - No agent loop, retries, turn limits or approval flow: those are your loop, and the vendor SDK's client.
+- Nothing that runs a tool. The library says what the model may call, what it called and what came of it; finding the code for a call and running it is yours.
 - No retrieval, persistence or scheduling.
-- No typed answer from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
-- The Anthropic provider sends only tools you define. It cannot yet send Anthropic's server tools such as web search, and it does not carry text citations.
+- No structured output from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
+- The Anthropic provider sends only tools you define. It cannot yet send Anthropic's server tools such as web search, so the sources it tells of are those of documents you gave it.

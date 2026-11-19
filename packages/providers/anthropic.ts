@@ -5,6 +5,7 @@ import {
   fitSchema,
   fitToolIds,
   toolResult,
+  type End,
   type FilePart,
   type ModelMessage,
   type NativePart,
@@ -13,10 +14,13 @@ import {
   type ReasoningPart,
   type Request,
   type ShapeSpec,
+  type SourcePart,
   type Takes,
   type TextPart,
   type ToolCall,
+  type ToolInputPart,
   type ToolResult,
+  type ToolSpec,
   type Usage,
   type UserMessage,
 } from "@ai-agent-library/library";
@@ -28,9 +32,17 @@ export type AnthropicBlock = Exclude<
   Anthropic.TextBlock | Anthropic.ToolUseBlock
 >;
 export type AnthropicNative = NativePart<"anthropic", AnthropicBlock>;
+/**
+ * A source as Anthropic cites one: the shared fields, and under Anthropic's
+ * name the citation as its API gave it, with the document, pages or
+ * characters it points at.
+ */
+export type AnthropicSource = SourcePart & { anthropic: Anthropic.TextCitation };
 export type AnthropicOut =
   | TextPart
+  | AnthropicSource
   | ReasoningPart
+  | ToolInputPart
   | ToolCall
   | AnthropicNative;
 
@@ -48,20 +60,78 @@ export type AnthropicHints = {
 };
 
 /**
+ * Anthropic's own settings for a file, carried as an extra field on it: every
+ * one its API has for a document, such as `citations`, `title`, `context` and
+ * `cache_control`. On a PDF or a text file they are sent as they are. An image
+ * takes only `cache_control`, and the rest is not read on one.
+ *
+ * Like any hint, it is read on a file in a message itself, not on one inside a
+ * tool result. Every other provider ignores the field and is given the same file.
+ */
+export type AnthropicFileHints = {
+  anthropic?: Omit<Anthropic.DocumentBlockParam, "source" | "type">;
+};
+
+/**
+ * What Anthropic said of a response besides its content: the message as its
+ * API ended it, with everything but the content, and the id of the request
+ * that made it. So it holds, among the rest, which stop sequence matched, why
+ * a refusal was made, and usage as Anthropic counts it.
+ *
+ * It is the API's own object, kept as it came, so whatever Anthropic adds to
+ * a message arrives here with a newer SDK and nothing else.
+ */
+export type AnthropicResponse = Omit<Anthropic.Message, "content"> & {
+  /** The request's id, for Anthropic's support; null if the response did not carry one. */
+  request_id: string | null;
+};
+/** The End of a turn from this provider: the shared End, and Anthropic's own account under its name. */
+export type AnthropicEnd = End & { anthropic?: AnthropicResponse };
+
+/**
  * Any portable history, optionally with hints. Any provider's native parts are
  * accepted in a model turn; only Anthropic's own are sent.
+ *
+ * A turn this provider made holds Anthropic's account of the response under
+ * its name, where `append` put it. It is read here and never sent.
+ *
+ * Any provider's sources are accepted in a model turn. Anthropic's own go back
+ * as citations on the text they support; the rest are left out.
  */
 export type AnthropicMessage =
-  | UserMessage<(TextPart | FilePart) & AnthropicHints>
-  | ModelMessage<
-      ((TextPart | ToolCall) & AnthropicHints) | ReasoningPart | NativePart
-    >
+  | UserMessage<(TextPart & AnthropicHints) | (FilePart & AnthropicFileHints)>
+  | (ModelMessage<ModelPart> & { anthropic?: AnthropicResponse })
   | { from: "tool"; content: readonly (ToolResult & AnthropicHints)[] };
+type ModelPart =
+  | ((TextPart | ToolCall) & AnthropicHints)
+  | (FilePart & AnthropicFileHints)
+  | (SourcePart & { anthropic?: Anthropic.TextCitation })
+  | ReasoningPart
+  | ToolInputPart
+  | NativePart;
 
-/** A request whose system prompt, given as parts, may carry hints too. */
+/**
+ * Anthropic's own settings for a tool, carried as an extra field on it: every
+ * one its API has for a tool you define, such as `cache_control`, `strict` and
+ * `eager_input_streaming`. They are sent as they are. What the tool is, its
+ * name, description and schema, is not among them and cannot be set here.
+ *
+ * Every other provider ignores the field and is told the same tool.
+ */
+export type AnthropicToolHints = {
+  anthropic?: Omit<
+    Anthropic.Tool,
+    "name" | "description" | "input_schema" | "type"
+  >;
+};
+/** A tool, optionally with Anthropic's settings for it. */
+export type AnthropicTool = ToolSpec & AnthropicToolHints;
+
+/** A request whose system prompt, given as parts, and whose tools may carry hints too. */
 export type AnthropicRequest = Request<
   AnthropicMessage,
-  TextPart & AnthropicHints
+  TextPart & AnthropicHints,
+  AnthropicTool
 >;
 
 type Options = Omit<
@@ -88,30 +158,58 @@ const source = (part: FilePart) => {
   );
 };
 
+// Anthropic takes a text document as the text itself, never as base64 or by link.
+const plainText = (part: FilePart): Anthropic.PlainTextSource => {
+  const from = source(part);
+  if (from.type === "url")
+    throw new Error("anthropic: cannot send a text/plain file by link");
+  const bytes = Uint8Array.from(atob(from.data), (c) => c.charCodeAt(0));
+  return {
+    type: "text",
+    media_type: "text/plain",
+    data: new TextDecoder().decode(bytes),
+  };
+};
+
+/**
+ * A file as Anthropic takes it: an image, or a document. `settings` is what
+ * the file's hint says, if it is read where the file sits. A document's
+ * settings are addressed to Anthropic by name, so they go as they are; what
+ * the document is comes after, so nothing there can replace it.
+ */
 const fileBlock = (
   part: FilePart,
+  settings?: AnthropicFileHints["anthropic"],
 ): Anthropic.ImageBlockParam | Anthropic.DocumentBlockParam => {
   const { mediaType } = part;
-  const from = source(part);
-  if (isImage(mediaType))
+  if (isImage(mediaType)) {
+    const from = source(part);
     return {
       type: "image",
       source: from.type === "url" ? from : { ...from, media_type: mediaType },
+      cache_control: settings?.cache_control,
     };
-  if (mediaType === "application/pdf")
+  }
+  if (mediaType === "application/pdf") {
+    const from = source(part);
     return {
+      ...settings,
       type: "document",
       source: from.type === "url" ? from : { ...from, media_type: mediaType },
     };
+  }
+  if (mediaType === "text/plain")
+    return { ...settings, type: "document", source: plainText(part) };
   throw new Error(`anthropic: cannot send a ${mediaType} file`);
 };
 
 // One translator per origin, because each origin allows different parts.
 // A part none of them recognises is an error here, never forwarded to the API.
 
-/** The one hint this provider knows. Nothing else in the field is forwarded. */
+/** The one hint read on a part that is not a file. Nothing else in the field is forwarded. */
 const cache = (part: AnthropicHints) => part.anthropic?.cache_control;
 
+/** A part of a tool result. No hint is read here. */
 const block = (part: TextPart | FilePart) => {
   switch (part.type) {
     case "text":
@@ -123,17 +221,47 @@ const block = (part: TextPart | FilePart) => {
   }
 };
 
+/** A part of a user message, with what its hint says. */
+const given = (
+  part: (TextPart & AnthropicHints) | (FilePart & AnthropicFileHints),
+) => {
+  switch (part.type) {
+    case "text":
+      return {
+        type: "text",
+        text: part.text,
+        cache_control: cache(part),
+      } as const;
+    case "file":
+      return fileBlock(part, part.anthropic);
+    default:
+      throw unsendable(part);
+  }
+};
+
 // The name is the only evidence a stored native part offers about its value.
 const isOwn = (part: NativePart): part is AnthropicNative =>
   part.provider === "anthropic";
 
-/** A model-turn part as Anthropic takes it back. Another provider's native part is left out. */
+/**
+ * A model-turn part as Anthropic takes it back, where that depends on the part
+ * alone. Another provider's native part is left out. A source depends on the
+ * text before it, and is put back by `turn`.
+ */
 const echoed = (
-  part: ((TextPart | ToolCall) & AnthropicHints) | ReasoningPart | NativePart,
+  part: Exclude<ModelPart, SourcePart>,
 ): Anthropic.ContentBlockParam[] => {
   switch (part.type) {
+    // A file a model made, in another provider's turn: Claude writes none
+    // into its own. It goes as a file does anywhere, and whether one may sit
+    // in a model turn is Anthropic's to say.
+    case "file":
+      return [fileBlock(part, part.anthropic)];
     // Shown, never sent. The thinking block itself goes back as a native part.
     case "reasoning":
+      return [];
+    // Shown, never sent. It is the input of a call that never arrived.
+    case "tool_input":
       return [];
     case "text":
       return [{ type: "text", text: part.text, cache_control: cache(part) }];
@@ -154,6 +282,37 @@ const echoed = (
   }
 };
 
+/**
+ * A model turn as Anthropic takes it back. A source of Anthropic's own goes
+ * back as a citation on the text it supports, which is the text block before
+ * it: all of it, or only its last `span` characters when that text had joined
+ * text the source says nothing of. Another provider's source is left out, and
+ * so is one with no text before it.
+ */
+const turn = (content: readonly ModelPart[]): Anthropic.ContentBlockParam[] =>
+  content.reduce<Anthropic.ContentBlockParam[]>((blocks, part) => {
+    if (part.type !== "source") return [...blocks, ...echoed(part)];
+    // The name is the only evidence a stored source offers about whose it is.
+    const citation = part.anthropic;
+    const last = blocks.at(-1);
+    if (!citation || last?.type !== "text") return blocks;
+    const before = blocks.slice(0, -1);
+    const span = part.span ?? last.text.length;
+    if (!last.citations && span > 0 && span < last.text.length) {
+      // A cache breakpoint is up to and including its part, so it stays on the end.
+      const { cache_control, ...uncited } = last;
+      return [
+        ...before,
+        { ...uncited, text: last.text.slice(0, -span) },
+        { ...last, text: last.text.slice(-span), citations: [citation] },
+      ];
+    }
+    return [
+      ...before,
+      { ...last, citations: [...(last.citations ?? []), citation] },
+    ];
+  }, []);
+
 const answered = (
   part: ToolResult & AnthropicHints,
 ): Anthropic.ToolResultBlockParam => ({
@@ -167,15 +326,9 @@ const answered = (
 const message = (m: AnthropicMessage): Anthropic.MessageParam => {
   switch (m.from) {
     case "user":
-      return {
-        role: "user",
-        content: m.content.map((part) => ({
-          ...block(part),
-          cache_control: cache(part),
-        })),
-      };
+      return { role: "user", content: m.content.map(given) };
     case "model":
-      return { role: "assistant", content: m.content.flatMap(echoed) };
+      return { role: "assistant", content: turn(m.content) };
     case "tool":
       return { role: "user", content: m.content.map(answered) };
     default:
@@ -328,15 +481,41 @@ const reason = (stop: string | null): Reason =>
     ? reasons[stop as Anthropic.StopReason]
     : "unknown";
 
+// A citation as a source: what every provider can say of one, and Anthropic's
+// own citation under its name. `span` is the length of the text block it was on.
+const cited = (
+  citation: Anthropic.TextCitation,
+  span: number,
+): AnthropicSource => {
+  const title =
+    "document_title" in citation ? citation.document_title : citation.title;
+  return {
+    type: "source",
+    span,
+    quote: citation.cited_text,
+    ...(title != null && { title }),
+    ...("url" in citation && { url: citation.url }),
+    anthropic: citation,
+  };
+};
+
+// The same value as plain JSON. The SDK leaves fields it was not sent as
+// undefined, and a history has to come back equal from JSON.stringify and JSON.parse.
+const plain = <T extends object>(value: T): T =>
+  JSON.parse(JSON.stringify(value));
+
 // Anthropic counts cached tokens apart from input_tokens; `input` here is all three.
+// Thinking is counted within output_tokens, and told apart only when Anthropic says how much it was.
 const spent = (usage: Anthropic.Usage): Usage => {
   const cacheRead = usage.cache_read_input_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const details = usage.output_tokens_details;
   return {
     input: usage.input_tokens + cacheRead + cacheWrite,
     output: usage.output_tokens,
     cacheRead,
     cacheWrite,
+    ...(details && { reasoning: details.thinking_tokens }),
   };
 };
 
@@ -359,8 +538,11 @@ export const anthropic = (
           .map(message)
           .filter((m) => m.content.length > 0),
         // An empty list is the same as none, and none is said by leaving the field out.
+        // A tool's settings for Anthropic are addressed to it by name, so they
+        // go as they are. What the tool is comes after, so nothing there can replace it.
         tools: tools?.length
-          ? tools.map(({ name, description, schema }) => ({
+          ? tools.map(({ name, description, schema, anthropic }) => ({
+              ...anthropic,
               name,
               description,
               input_schema: schema as Anthropic.Tool.InputSchema,
@@ -390,6 +572,33 @@ export const anthropic = (
         event.delta.thinking !== ""
       )
         yield { type: "reasoning", text: event.delta.thinking };
+      // A call is told as it is written: that it has begun, then each piece
+      // of its input as Anthropic sends it. The call itself still arrives
+      // whole, below, directly after its pieces, and takes their place.
+      if (
+        event.type === "content_block_start" &&
+        event.content_block.type === "tool_use"
+      )
+        yield {
+          type: "tool_input",
+          id: event.content_block.id,
+          name: event.content_block.name,
+          text: "",
+        };
+      if (
+        event.type === "content_block_delta" &&
+        event.delta.type === "input_json_delta" &&
+        event.delta.partial_json !== ""
+      ) {
+        const writing = stream.currentMessage?.content[event.index];
+        if (writing?.type === "tool_use")
+          yield {
+            type: "tool_input",
+            id: writing.id,
+            name: writing.name,
+            text: event.delta.partial_json,
+          };
+      }
       if (event.type === "content_block_stop") {
         const done = stream.currentMessage?.content[event.index];
         if (done?.type === "tool_use")
@@ -399,11 +608,26 @@ export const anthropic = (
             name: done.name,
             input: done.input,
           };
-        else if (done && done.type !== "text")
+        // The passages a text block rests on are told once it is whole,
+        // directly after its text, each saying how much text is its own.
+        else if (done?.type === "text")
+          for (const citation of done.citations ?? [])
+            yield cited(citation, done.text.length);
+        else if (done)
           yield { type: "native", provider: "anthropic", value: done };
       }
     }
-    // One End per turn, once the whole message is in, with what it cost.
-    const { stop_reason, usage } = await stream.finalMessage();
-    yield { type: "end", reason: reason(stop_reason), usage: spent(usage) };
+    // One End per turn, once the whole message is in: why it ended, what it
+    // cost, and the message itself without its content, as Anthropic's account
+    // of it. `parsed_output` is the SDK's own reading of that content, so it goes too.
+    const { content, parsed_output, ...ended } = await stream.finalMessage();
+    const end: AnthropicEnd = {
+      type: "end",
+      reason: reason(ended.stop_reason),
+      usage: spent(ended.usage),
+      id: ended.id,
+      model: ended.model,
+      anthropic: plain({ ...ended, request_id: stream.request_id ?? null }),
+    };
+    yield end;
   };

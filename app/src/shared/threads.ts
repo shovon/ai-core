@@ -3,7 +3,7 @@
  * surface on `window.agent.threads`. Bundled into the page too, so it stays
  * free of `node:` imports. Everything here crosses the bridge as plain JSON.
  */
-import type { End, NativePart, PortableMessage, ReasoningPart, TextPart, ToolCall } from '@ai-agent-library/library';
+import type { End, NativePart, PortableMessage, ReasoningPart, SourcePart, TextPart, ToolCall, ToolInputPart } from '@ai-agent-library/library';
 
 export const THREAD_CHANNELS = {
   list: 'threads:list',
@@ -18,8 +18,12 @@ export const THREAD_CHANNELS = {
   event: 'threads:event',
 } as const;
 
-/** What a model turn in a stored history is made of. */
-export type ModelPart = TextPart | ReasoningPart | ToolCall | NativePart;
+/**
+ * What a model turn is made of. Tool input is only ever in a turn still
+ * arriving: the call it belongs to takes its place, and a stopped turn is
+ * stored without it.
+ */
+export type ModelPart = TextPart | SourcePart | ReasoningPart | ToolInputPart | ToolCall | NativePart;
 
 /** One message of a thread, and the item it follows; null when it follows nothing. */
 export type Item = { id: string; parent: string | null; message: PortableMessage };

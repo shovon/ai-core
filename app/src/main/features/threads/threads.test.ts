@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tool, type AnyMessage, type End, type PortableMessage, type Provider, type Tool } from '@ai-agent-library/library';
+import { parse, type AnyMessage, type End, type PortableMessage, type Provider } from '@ai-agent-library/library';
 import { children, path } from '@ai-agent-library/tree';
-import { createThreads, titleOf, TOOL_ROUNDS } from './threads.ts';
+import { createThreads, titleOf, TOOL_ROUNDS, type Tool } from './threads.ts';
 import { memoryStore } from './memory-store.ts';
 import type { ModelPart, ThreadEvent } from '../../../shared/threads.ts';
 
@@ -301,11 +301,11 @@ test('read() is the whole thread, every branch of it, or undefined', async () =>
 
 // A provider that says each of the given pieces and then waits, as a slow
 // answer does, until it is stopped: then it throws, as an aborted call does.
-const stalling = (...pieces: string[]) => {
+const stalling = (...pieces: (string | ModelPart)[]) => {
   let calls = 0;
   const provider: Provider<PortableMessage, ModelPart> = async function* ({ signal }) {
     calls++;
-    for (const piece of pieces) yield say(piece);
+    for (const piece of pieces) yield typeof piece === 'string' ? say(piece) : piece;
     await new Promise((_resolve, reject) => {
       if (signal?.aborted) reject(new Error('aborted'));
       signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -332,6 +332,20 @@ test('stop() keeps what had arrived as a turn that never ended, and the send set
   // The page is told it is stored, so it is no longer arriving.
   const last = events.at(-1);
   assert.equal(last?.type === 'changed' && last.added.length, 1);
+});
+
+test('stop() while a call is being written keeps what was said, and nothing of the call', async () => {
+  const writing: ModelPart = { type: 'tool_input', id: 'c1', name: 'lookup', text: '{"q":"bl' };
+  const { threads, store, events } = setup(stalling('Checking.', writing));
+  const { id } = await threads.create();
+  const sending = threads.send(id, null, 'name a colour');
+  await settle();
+  await threads.stop(id);
+  await sending;
+
+  // The page saw the call being written, as it happened.
+  assert.ok(events.some((event) => event.type === 'chunk' && event.chunk === writing));
+  assert.deepEqual((await store.items(id))[1]?.message, { from: 'model', content: [{ type: 'text', text: 'Checking.' }] });
 });
 
 test('stop() before anything to read has arrived keeps nothing, and still tells the page', async () => {
@@ -500,17 +514,21 @@ const calls = (id: string, name: string, input: unknown = {}): ModelPart => ({ t
 // A tool that looks a word up in a small book, and records what it was asked.
 const lookup = (book: Record<string, string>) => {
   const asked: string[] = [];
-  const made = tool({
+  const told = {
     name: 'look_up',
     description: 'Looks a word up.',
     schema: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] },
-    run: ({ word }) => {
+  } as const;
+  const made: Tool = {
+    ...told,
+    run: (call) => {
+      const { word } = parse(told.schema, call.input);
       asked.push(word);
       const found = book[word];
       if (found === undefined) throw new Error(`no entry for ${word}`);
       return found;
     },
-  });
+  };
   return Object.assign(made, { asked });
 };
 // What a tool message holds, as "id: text" with a mark on a failure.
@@ -571,13 +589,23 @@ test('with no tools, none are offered: the request does not mention them', async
   assert.deepEqual((requests[1] as { tools: Tool[] }).tools.map((offered) => offered.name), ['look_up']);
 });
 
+test('a tool whose schema cannot be enforced is a mistake in the code: the answer fails, and the model is not told', async () => {
+  const schema = { type: 'string', pattern: '^a' };
+  const broken: Tool = { name: 'look_up', description: 'Looks a word up.', schema, run: (call) => String(parse(schema, call.input)) };
+  const provider = scripted([calls('c1', 'look_up', 'azure'), stop], [say('Never asked.'), stop]);
+  const { threads } = setup(provider, [broken]);
+  const { id } = await threads.create();
+  await assert.rejects(threads.send(id, null, 'what is azure?'), /"pattern" is not one this enforces/);
+  assert.equal(provider.seen.length, 1);
+});
+
 test('stopped while a tool runs: every call still gets a result, so the thread can go on', async () => {
-  const slow = tool({
+  const slow: Tool = {
     name: 'look_up',
     description: 'Looks a word up, slowly.',
     schema: { type: 'object' },
-    run: (_input, { signal }) => new Promise<string>((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted')))),
-  });
+    run: (_input, signal) => new Promise<string>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))),
+  };
   const provider = scripted([calls('c1', 'look_up'), calls('c2', 'look_up'), stop], [say('Never mind.'), stop]);
   const { threads, store, go } = setup(provider, [slow]);
   const { id } = await threads.create();

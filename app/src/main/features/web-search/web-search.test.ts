@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runToolCall, type ToolCall } from "@ai-agent-library/library";
+import type { ToolCall } from "@ai-agent-library/library";
 import { cloudflareSearch } from "./cloudflare.ts";
 import { listed, webSearch, type Found, type Search } from "./web-search.ts";
 
@@ -15,8 +15,6 @@ const call = (input: unknown): ToolCall => ({
   name: "web_search",
   input,
 });
-const text = (result: { content: readonly { type: string }[] }) =>
-  result.content.map((part) => ("text" in part ? part.text : "")).join("");
 
 // ── The tool ────────────────────────────────────────────────────────────────
 
@@ -26,14 +24,12 @@ test("the tool searches for what the model asked and hands back the results as a
     asked.push(query),
     [page(1), page(2)]
   );
-  const result = await runToolCall(
-    [webSearch(search)],
+  const result = await webSearch(search).run(
     call({ query: "  cayley bacharach  " }),
   );
   assert.deepEqual(asked, ["cayley bacharach"]);
-  assert.equal(result.error, undefined);
   assert.equal(
-    text(result),
+    result,
     [
       "1. Page 1",
       "   https://example.com/1",
@@ -66,13 +62,13 @@ test("a long description is cut, kept on one line, and a result with no title go
   assert.equal(long.split("\n").length, 3);
 });
 
-test("a call the model got wrong goes back to it as an error, and nothing is searched", async () => {
+test("a call the model got wrong throws what is wrong with it, and nothing is searched", async () => {
   let searched = 0;
-  const tools = [webSearch(async () => (searched++, []))];
+  const { run } = webSearch(async () => (searched++, []));
   for (const [input, why] of [
     [{}, /query is missing/],
     [{ query: 7 }, /query must be a string/],
-    ["cats", /input must be an object/],
+    ["cats", /value must be an object/],
     [{ query: "" }, /query must be 1 or more characters long/],
     [{ query: "   " }, /query must not be empty/],
     [
@@ -81,26 +77,19 @@ test("a call the model got wrong goes back to it as an error, and nothing is sea
     ],
     [{ query: "cats", site: "example.com" }, /site is not expected/],
   ] as const) {
-    const result = await runToolCall(tools, call(input));
-    assert.equal(result.error, true);
-    assert.match(text(result), why);
+    await assert.rejects(run(call(input)), why);
   }
   assert.equal(searched, 0);
 });
 
-test("a search that fails goes back to the model as an error, so it can say so or try again", async () => {
-  const result = await runToolCall(
-    [
-      webSearch(async () =>
-        Promise.reject(
-          new Error("web search failed: 403 Authentication error"),
-        ),
-      ),
-    ],
-    call({ query: "cats" }),
+test("a search that fails throws what went wrong, for the model to be told", async () => {
+  const { run } = webSearch(async () =>
+    Promise.reject(new Error("web search failed: 403 Authentication error")),
   );
-  assert.equal(result.error, true);
-  assert.match(text(result), /web search failed: 403 Authentication error/);
+  await assert.rejects(
+    run(call({ query: "cats" })),
+    /web search failed: 403 Authentication error/,
+  );
 });
 
 test("the tool tells the model when to use it, and takes one string", () => {

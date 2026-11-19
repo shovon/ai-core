@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, SubmitEvent } from 'react';
-import { isReasoning, isText, isToolCall, type AnyMessage, type Part, type ToolCall, type ToolResult } from '@ai-agent-library/library';
+import { isReasoning, isText, isToolCall, isToolInput, type AnyMessage, type Part, type ToolCall, type ToolResult } from '@ai-agent-library/library';
 import Markdown from '../Markdown/Markdown.tsx';
 
 /** One message on screen. */
@@ -59,6 +59,8 @@ const ending = ({ message, id }: Row) => {
 const shows = (part: Part, active: boolean) => {
   if (isText(part)) return part.text !== '';
   if (isReasoning(part)) return active || part.text.trim() !== '';
+  // A call still being written shows only while it is: the call itself takes its place.
+  if (isToolInput(part)) return active;
   return isToolCall(part);
 };
 
@@ -234,6 +236,7 @@ const PartView = ({ part, active, busy, results }: { part: Part; active: boolean
   if (!shows(part, active)) return null;
   if (isText(part)) return <Markdown text={part.text} />;
   if (isReasoning(part)) return <Reasoning text={part.text} active={active} />;
+  if (isToolInput(part)) return <p className={quiet}>Calling {part.name.replaceAll('_', ' ')}…</p>;
   if (isToolCall(part)) return <Called call={part} result={results.get(part.id)} busy={busy} />;
   return null;
 };

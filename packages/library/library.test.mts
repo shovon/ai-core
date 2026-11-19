@@ -3,25 +3,27 @@ import assert from "node:assert/strict";
 import {
   answerToolCalls,
   append,
-  attemptToolCall,
   collect,
   toolFailure,
   file,
   fitSchema,
   fitToolIds,
   isReasoning,
+  isSchemaError,
+  isSource,
   isText,
-  model,
+  isToolCall,
+  isToolInput,
+  parse,
+  partial,
   pendingToolCalls,
   toolResult,
-  runToolCall,
-  shape,
   text,
-  tool,
   totalUsage,
   user,
   type AnyMessage,
   type End,
+  type FilePart,
   type Message,
   type ModelMessage,
   type NativePart,
@@ -31,10 +33,12 @@ import {
   type ReasoningPart,
   type Reply,
   type Request,
+  type SourcePart,
   type TextPart,
-  type Tool,
   type ToolCall,
+  type ToolInputPart,
   type ToolResult,
+  type ToolSpec,
   type UserMessage,
 } from "./library.ts";
 
@@ -59,7 +63,7 @@ const played = async function* (...chunks: (Part | End)[]) {
 const loop = async (
   provider: Provider<AnyMessage, Part>,
   messages: AnyMessage[],
-  tools: readonly Tool[],
+  tools: readonly ToolSpec[],
 ) => {
   for (;;) {
     messages.push(...(await collect(provider({ messages, tools }))));
@@ -69,7 +73,7 @@ const loop = async (
     if (calls.length === 0) break;
     messages.push({
       from: "tool",
-      content: await Promise.all(calls.map((c) => runToolCall(tools, c))),
+      content: await Promise.all(calls.map(respond)),
     });
   }
 };
@@ -83,8 +87,8 @@ const call = (id: string, name: string, input: unknown = {}): ToolCall => ({
 });
 const stop: End = { type: "end", reason: "stop" };
 const cut: End = { type: "end", reason: "length" };
-// A tool without its `run`. Held in a variable, a schema needs `as const` to type the input; written inside tool() it does not.
-const forecast = {
+// What the model is told of a tool. Held in a variable, a schema needs `as const` to type the input.
+const weather = {
   name: "get_weather",
   description: "Current weather for a city.",
   schema: {
@@ -93,14 +97,26 @@ const forecast = {
     required: ["city"],
   },
 } as const;
-const weather = tool({ ...forecast, run: (input) => `18C in ${input.city}` });
+// What a caller writes for itself: what a call does, and the result it comes to.
+const run = (c: ToolCall): string => {
+  if (c.name !== weather.name) throw new Error(`unknown tool: ${c.name}`);
+  return `18C in ${parse(weather.schema, c.input).city}`;
+};
+const respond = async (c: ToolCall): Promise<ToolResult> => {
+  try {
+    return toolResult(c, run(c));
+  } catch (error) {
+    return toolFailure(c, error);
+  }
+};
 // What the model is told when an input does not fit a schema; undefined when it fits.
-const refused = async (schema: object, input: unknown) => {
-  const made = tool({ name: "t", description: "", schema, run: () => "ok" });
-  const { content, error } = await runToolCall([made], call("1", "t", input));
-  return error
-    ? content.map((part) => ("text" in part ? part.text : "")).join("")
-    : undefined;
+const refused = (schema: object, input: unknown) => {
+  try {
+    parse(schema, input);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 };
 const toronto = call("1", "get_weather", { city: "Toronto" });
 const answer: ToolResult = {
@@ -109,9 +125,9 @@ const answer: ToolResult = {
   content: [say("18C in Toronto")],
 };
 
-test("model() turns a bare string into a request; text() reads the answer", async () => {
+test("user() makes a text message from a bare string; text() reads the answer", async () => {
   const provider = scripted<TextPart>([say("hel"), say("lo"), stop]);
-  assert.equal(await text(model(provider)("hi")), "hello");
+  assert.equal(await text(provider({ messages: [user("hi")] })), "hello");
   assert.deepEqual(provider.seen[0], {
     messages: [{ from: "user", content: [say("hi")] }],
   });
@@ -141,6 +157,151 @@ test("file() keeps bytes as base64 and a link as a string, so the part is plain 
   ]);
 });
 
+test("a model may make a file: it arrives whole, stays where it was said, and is part of a portable history", async () => {
+  const drawn = file("image/png", new Uint8Array([1, 2, 3]));
+  const reply = await collect(
+    played(say("Here "), say("it is."), drawn, say("Like it?"), stop),
+  );
+  // Text joins on either side of it, never across it.
+  assert.deepEqual(reply, [
+    {
+      from: "model",
+      content: [say("Here it is."), drawn, say("Like it?")],
+      end: "stop",
+    },
+  ]);
+  // It is no part of the answer's text, and asks for nothing.
+  assert.equal(
+    await text(played(say("Here it is."), drawn, say("Like it?"), stop)),
+    "Here it is.Like it?",
+  );
+  assert.deepEqual(pendingToolCalls(reply), []);
+  // Any provider can be handed the history, and it is plain JSON.
+  const history: PortableMessage[] = [user("draw a cat"), ...reply];
+  assert.deepEqual(JSON.parse(JSON.stringify(history)), history);
+});
+
+// The recipe from the README: fetching is the caller's, and the library only makes the part.
+const fetched = async (
+  part: FilePart & { url: string },
+  get: typeof fetch,
+): Promise<FilePart> => {
+  const response = await get(part.url);
+  if (!response.ok)
+    throw new Error(`could not fetch ${part.url}: ${response.status}`);
+  const { url, ...rest } = part;
+  return {
+    ...rest,
+    ...file(part.mediaType, new Uint8Array(await response.arrayBuffer())),
+  };
+};
+const inlined = async (
+  message: UserMessage<TextPart | FilePart>,
+  get: typeof fetch = fetch,
+): Promise<UserMessage<TextPart | FilePart>> => ({
+  ...message,
+  content: await Promise.all(
+    message.content.map((part) =>
+      part.type === "file" && "url" in part ? fetched(part, get) : part,
+    ),
+  ),
+});
+
+test("a file given by link can be fetched by the caller and given as its bytes, with nothing from the library but file()", async () => {
+  const asked: string[] = [];
+  const get: typeof fetch = async (input) => {
+    asked.push(String(input));
+    return String(input).endsWith("/missing.pdf")
+      ? new Response(null, { status: 404 })
+      : new Response(new Uint8Array([1, 2, 3]));
+  };
+  const linked = {
+    ...file("application/pdf", new URL("http://localhost:8080/report.pdf")),
+    acme: { title: "Q3 report" },
+  };
+  const already = file("image/png", new Uint8Array([9]));
+  const message = await inlined(user(linked, already, "Summarise."), get);
+  // The link is gone and the bytes are there; the rest of the part, a hint included, is as it was.
+  assert.deepEqual(message, {
+    from: "user",
+    content: [
+      {
+        type: "file",
+        mediaType: "application/pdf",
+        data: "AQID",
+        acme: { title: "Q3 report" },
+      },
+      already,
+      say("Summarise."),
+    ],
+  });
+  // Only the linked file was fetched, and the message is still plain JSON.
+  assert.deepEqual(asked, ["http://localhost:8080/report.pdf"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(message)), message);
+  // A link that cannot be fetched is an error where it is fetched, before anything is sent.
+  const missing = file("application/pdf", new URL("http://localhost/missing.pdf"));
+  await assert.rejects(inlined(user(missing), get), /could not fetch .*: 404/);
+});
+
+test("a source follows the text it supports, and its span keeps it to its own passage when text has joined", async () => {
+  const freight: SourcePart = {
+    type: "source",
+    span: 18,
+    quote: "Freight expense rose 31%.",
+    title: "Q3 report",
+  };
+  const rates: SourcePart = {
+    type: "source",
+    span: 18,
+    quote: "Container rates doubled.",
+    url: "https://example.com/rates",
+  };
+  const chunks = [
+    say("Margins fell, "),
+    say("mainly on "),
+    say("freight."),
+    freight,
+    rates,
+    say(" Pricing "),
+    say("was flat."),
+    stop,
+  ];
+  const reply = await collect(played(...chunks));
+  // Text joins up to a source and after it, never across it. Sources in a row stay as they came.
+  assert.deepEqual(reply, [
+    {
+      from: "model",
+      content: [
+        say("Margins fell, mainly on freight."),
+        freight,
+        rates,
+        say(" Pricing was flat."),
+      ],
+      end: "stop",
+    },
+  ]);
+  // The passage a source speaks for is the end of the text before it.
+  const [turn] = reply;
+  assert.ok(turn?.from === "model");
+  const passages = turn.content.flatMap((part, i) => {
+    const before = turn.content[i - 1];
+    return isSource(part) && before && isText(before)
+      ? [before.text.slice(-(part.span ?? before.text.length))]
+      : [];
+  });
+  assert.deepEqual(passages, ["mainly on freight."]);
+  // A source is no part of the answer's text, and asks for nothing.
+  assert.equal(
+    await text(played(...chunks)),
+    "Margins fell, mainly on freight. Pricing was flat.",
+  );
+  assert.deepEqual(pendingToolCalls(reply), []);
+  assert.ok(isSource(freight) && !isSource(say("x")) && !isText(freight));
+  // Any provider can be handed the history, and it is plain JSON.
+  const history: PortableMessage[] = [user("margins?"), ...reply];
+  assert.deepEqual(JSON.parse(JSON.stringify(history)), history);
+});
+
 test("append() is pure and builds turns: parts join, End finishes, results group", () => {
   const empty: Reply<TextPart | ToolCall> = [];
   const chunks = [
@@ -167,6 +328,74 @@ test("append() is pure and builds turns: parts join, End finishes, results group
   assert.deepEqual(append(empty, cut), [
     { from: "model", content: [], end: "length" },
   ]);
+});
+
+test("append() keeps all an End carries on the turn: the reason as `end`, and the rest as it is", () => {
+  // What a provider says of its response: the shared id and model, and its own account under its name.
+  // A provider types its End as the shared one and more.
+  type AcmeEnd = End & { acme: { request: string; stopped_on: string } };
+  const told: AcmeEnd = {
+    type: "end",
+    reason: "stop",
+    usage: { input: 3, output: 5 },
+    id: "resp_1",
+    model: "model-2026-01-01",
+    acme: { request: "req_9", stopped_on: "END" },
+  };
+  const empty: Reply<TextPart> = [];
+  const said = {
+    usage: { input: 3, output: 5 },
+    id: "resp_1",
+    model: "model-2026-01-01",
+    acme: { request: "req_9", stopped_on: "END" },
+  };
+  const reply = [say("Blue."), told].reduce(append<TextPart>, empty);
+  assert.deepEqual(reply, [
+    { from: "model", content: [say("Blue.")], end: "stop", ...said },
+  ]);
+  // The shared two are there to read by name.
+  const [turn] = reply;
+  assert.ok(turn?.from === "model");
+  assert.deepEqual([turn.id, turn.model], ["resp_1", "model-2026-01-01"]);
+  // A turn with nothing in it keeps them just the same.
+  assert.deepEqual(append(empty, told), [
+    { from: "model", content: [], end: "stop", ...said },
+  ]);
+  // An End that says nothing more adds nothing more.
+  assert.deepEqual(append(empty, stop), [
+    { from: "model", content: [], end: "stop" },
+  ]);
+  // It is all plain data, so a stored history holds it too.
+  assert.deepEqual(JSON.parse(JSON.stringify(reply)), reply);
+});
+
+test("what an End carries is for reading: collect() keeps it, and text() and totalUsage() go on as before", async () => {
+  const told: End = {
+    type: "end",
+    reason: "stop",
+    usage: { input: 3, output: 5 },
+    id: "resp_1",
+    model: "model-2026-01-01",
+  };
+  const reply = await collect(played(say("Blue."), told));
+  assert.deepEqual(reply, [
+    {
+      from: "model",
+      content: [say("Blue.")],
+      end: "stop",
+      usage: { input: 3, output: 5 },
+      id: "resp_1",
+      model: "model-2026-01-01",
+    },
+  ]);
+  assert.equal(await text(played(say("Blue."), told)), "Blue.");
+  assert.deepEqual(totalUsage(reply), {
+    input: 3,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+  });
 });
 
 test("reasoning arrives in pieces and joins as text does, and the two never join each other", () => {
@@ -204,6 +433,92 @@ test("reasoning arrives in pieces and joins as text does, and the two never join
   assert.ok(
     isReasoning(thinks("x")) && !isReasoning(say("x")) && !isText(thinks("x")),
   );
+});
+
+const writes = (id: string, name: string, t: string): ToolInputPart => ({
+  type: "tool_input",
+  id,
+  name,
+  text: t,
+});
+
+test("tool input arrives in pieces and joins by call, and the whole call takes its place", () => {
+  const empty: Reply<TextPart | ToolInputPart | ToolCall> = [];
+  const add = append<TextPart | ToolInputPart | ToolCall>;
+  const pieces = [
+    say("Checking."),
+    writes("1", "get_weather", ""),
+    writes("1", "get_weather", '{"city":'),
+    writes("1", "get_weather", '"Toronto"}'),
+  ];
+  // While the call is being written there is one part, growing.
+  const writing = pieces.reduce(add, empty);
+  assert.deepEqual(writing, [
+    {
+      from: "model",
+      content: [
+        say("Checking."),
+        writes("1", "get_weather", '{"city":"Toronto"}'),
+      ],
+    },
+  ]);
+  // One with nothing in it yet is a part all the same: the model has started writing the call.
+  assert.deepEqual(add(empty, writes("1", "get_weather", "")), [
+    { from: "model", content: [writes("1", "get_weather", "")] },
+  ]);
+  // Told of or not, a call's input leaves the same reply.
+  assert.deepEqual(
+    [toronto, stop].reduce(add, writing),
+    [say("Checking."), toronto, stop].reduce(add, empty),
+  );
+  assert.deepEqual(empty, []);
+  assert.ok(
+    isToolInput(writes("1", "x", "")) &&
+      !isToolInput(toronto) &&
+      !isToolCall(writes("1", "x", "")),
+  );
+});
+
+test("tool input joins only its own call's, and gives way only to its own call, directly after", () => {
+  const empty: Reply<TextPart | ToolInputPart | ToolCall> = [];
+  const add = append<TextPart | ToolInputPart | ToolCall>;
+  const content = (...chunks: (TextPart | ToolInputPart | ToolCall)[]) =>
+    chunks.reduce(add, empty)[0]?.content;
+  // Two calls, one after the other: each call's input stays its own.
+  assert.deepEqual(content(writes("1", "a", "{"), writes("2", "b", "{")), [
+    writes("1", "a", "{"),
+    writes("2", "b", "{"),
+  ]);
+  // Another call takes no one's place.
+  assert.deepEqual(content(writes("2", "b", "{}"), toronto), [
+    writes("2", "b", "{}"),
+    toronto,
+  ]);
+  // Nor does a call with something between it and its input.
+  assert.deepEqual(content(writes("1", "a", "{}"), say("So."), toronto), [
+    writes("1", "a", "{}"),
+    say("So."),
+    toronto,
+  ]);
+  // Text never joins tool input, nor tool input text.
+  assert.deepEqual(content(say("{"), writes("1", "a", "}"), say("!")), [
+    say("{"),
+    writes("1", "a", "}"),
+    say("!"),
+  ]);
+});
+
+test("tool input whose call never arrived is kept for showing: it is no answer and asks for nothing", async () => {
+  const half = writes("1", "get_weather", '{"city":"Tor');
+  const reply = await collect(played(say("Checking."), half, stop));
+  assert.deepEqual(reply, [
+    { from: "model", content: [say("Checking."), half], end: "stop" },
+  ]);
+  assert.deepEqual(pendingToolCalls(reply), []);
+  assert.equal(await text(played(say("Checking."), half, stop)), "Checking.");
+  // It is part of a history any provider can be handed.
+  const kept: PortableMessage = { from: "model", content: [half] };
+  assert.deepEqual(JSON.parse(JSON.stringify(kept)), kept);
 });
 
 test("text() is the answer alone: reasoning is no part of it", async () => {
@@ -295,7 +610,7 @@ test("a hand-written loop decides what happens to each call", async () => {
       results.push(
         c.name === "delete_files"
           ? toolResult(c, "Denied.", { error: true })
-          : await runToolCall([weather], c),
+          : await respond(c),
       );
     messages.push({ from: "tool", content: results });
   }
@@ -352,58 +667,6 @@ test("text() of several turns is the final answer only, and tool results are not
   await assert.rejects(text(played(toronto, stop, answer)), /no final answer/);
 });
 
-test("runToolCall() turns a missing or a throwing tool into an error result", async () => {
-  const boom: Tool = {
-    ...weather,
-    name: "boom",
-    run: () => {
-      throw new Error("kaput");
-    },
-  };
-  assert.deepEqual(await runToolCall([boom], call("1", "nope")), {
-    type: "tool_result",
-    id: "1",
-    content: [say("unknown tool: nope")],
-    error: true,
-  });
-  assert.deepEqual(await runToolCall([boom], call("2", "boom")), {
-    type: "tool_result",
-    id: "2",
-    content: [say("kaput")],
-    error: true,
-  });
-});
-
-test("attemptToolCall() gives back what the tool returned, and throws what it threw, as it was thrown", async () => {
-  const kaput = new TypeError("kaput");
-  const boom: Tool = {
-    ...weather,
-    name: "boom",
-    run: () => {
-      throw kaput;
-    },
-  };
-  assert.equal(
-    await attemptToolCall([weather, boom], toronto),
-    "18C in Toronto",
-  );
-  // The very error, not a copy or a description of it.
-  assert.equal(
-    await attemptToolCall([weather, boom], call("1", "boom")).catch(
-      (error) => error,
-    ),
-    kaput,
-  );
-  await assert.rejects(
-    attemptToolCall([weather], call("1", "nope")),
-    /^Error: unknown tool: nope$/,
-  );
-  await assert.rejects(
-    attemptToolCall([weather], call("1", "get_weather", { city: 42 })),
-    /^Error: city must be a string$/,
-  );
-});
-
 test("toolFailure() is what the model reads: the thrower's own words, with nothing put before them", () => {
   const said = (error: unknown) => toolFailure(toronto, error);
   const reads = (words: string): ToolResult => ({
@@ -427,27 +690,19 @@ test("toolFailure() is what the model reads: the thrower's own words, with nothi
   assert.deepEqual(said(new RangeError()), reads("RangeError"));
 });
 
-test("runToolCall() written out: a failure can be seen before the model reads it, and a mistake in a tool's code can stop the loop", async () => {
-  const flaky: Tool = {
-    ...weather,
-    name: "flaky",
-    run: () => {
+test("a call's result is the caller's to make: a failure can be seen before the model reads it, and a mistake in the code can stop the loop", async () => {
+  const does: Record<string, (c: ToolCall) => string> = {
+    get_weather: run,
+    flaky: () => {
       throw new Error("no such city");
     },
-  };
-  const broken: Tool = {
-    ...weather,
-    name: "broken",
-    run: (input) =>
-      (input as { city: { name: string } }).city.name.toUpperCase(),
+    broken: (c) =>
+      (c.input as { city: { name: string } }).city.name.toUpperCase(),
   };
   const seen: unknown[] = [];
   const watched = async (c: ToolCall) => {
     try {
-      return toolResult(
-        c,
-        await attemptToolCall([weather, flaky, broken], c),
-      );
+      return toolResult(c, does[c.name]!(c));
     } catch (error) {
       seen.push(error);
       if (error instanceof TypeError) throw error;
@@ -466,44 +721,25 @@ test("runToolCall() written out: a failure can be seen before the model reads it
     TypeError,
   );
   assert.equal(seen.length, 2);
-  // runToolCall() itself lets nothing through: the same mistake is only something the model reads.
-  assert.equal(
-    (await runToolCall([broken], call("3", "broken", { city: "Toronto" })))
-      .error,
-    true,
-  );
 });
 
-test("tool(): input is checked and typed before run; bad input goes back to the model as an error", async () => {
-  let ran = 0;
-  const checked = tool({
-    ...forecast,
-    run: (input) => {
-      ran++;
-      return input.city.toUpperCase();
-    },
-  });
-  assert.deepEqual(await runToolCall([checked], toronto), {
-    type: "tool_result",
-    id: "1",
-    content: [say("TORONTO")],
-  });
-  const bad = await runToolCall(
-    [checked],
-    call("2", "get_weather", { city: 42 }),
+test("parse() reads a call's input: what fits comes back as it was, and what does not is named", async () => {
+  assert.equal(parse(weather.schema, toronto.input), toronto.input);
+  const wrong = call("2", "get_weather", { city: 42 });
+  assert.throws(
+    () => parse(weather.schema, wrong.input),
+    /^Error: city must be a string$/,
   );
-  assert.deepEqual(bad, {
+  // Thrown where a result is made, that is what the model reads, and it can correct the call.
+  assert.deepEqual(await respond(wrong), {
     type: "tool_result",
     id: "2",
     content: [say("city must be a string")],
     error: true,
   });
-  assert.equal(ran, 1);
-  // The schema the model is told is the one that was given, untouched.
-  assert.equal(checked.schema, forecast.schema);
 });
 
-test("tool(): the model is told everything wrong with an input at once, and where", async () => {
+test("parse(): the model is told everything wrong with a value at once, and where", () => {
   const schema = {
     type: "object",
     properties: {
@@ -541,15 +777,15 @@ test("tool(): the model is told everything wrong with an input at once, and wher
     sites: ["a.com"],
     where: { lat: 43.7 },
   };
-  assert.equal(await refused(schema, fine), undefined);
+  assert.equal(refused(schema, fine), undefined);
   assert.equal(
-    await refused(schema, { query: "cats", region: "ca" }),
+    refused(schema, { query: "cats", region: "ca" }),
     undefined,
   );
 
-  assert.equal(await refused(schema, "cats"), "input must be an object");
+  assert.equal(refused(schema, "cats"), "value must be an object");
   assert.equal(
-    await refused(schema, {}),
+    refused(schema, {}),
     "query is missing; region is missing",
   );
   const wrong = {
@@ -563,7 +799,7 @@ test("tool(): the model is told everything wrong with an input at once, and wher
     colour: "red",
   };
   assert.equal(
-    await refused(schema, wrong),
+    refused(schema, wrong),
     [
       "query must be 2 or more characters long",
       "limit must be an integer",
@@ -583,7 +819,7 @@ test("tool(): the model is told everything wrong with an input at once, and wher
     where: {},
   };
   assert.equal(
-    await refused(schema, over),
+    refused(schema, over),
     [
       "query must be 5 or fewer characters long",
       "limit must be 10 or less",
@@ -593,43 +829,42 @@ test("tool(): the model is told everything wrong with an input at once, and wher
     ].join("; "),
   );
   assert.equal(
-    await refused(schema, { ...fine, limit: 0 }),
+    refused(schema, { ...fine, limit: 0 }),
     "limit must be 1 or more",
   );
 });
 
-test("tool(): a keyword constrains only the kind of value it is about, and length is counted in characters", async () => {
+test("parse(): a keyword constrains only the kind of value it is about, and length is counted in characters", () => {
   assert.equal(
-    await refused({ minLength: 2, required: ["a"], minItems: 1 }, 5),
+    refused({ minLength: 2, required: ["a"], minItems: 1 }, 5),
     undefined,
   );
   assert.equal(
-    await refused({ type: "array" }, { length: 0 }),
-    "input must be an array",
+    refused({ type: "array" }, { length: 0 }),
+    "value must be an array",
   );
   assert.equal(
-    await refused({ type: "number" }, NaN),
-    "input must be a number",
+    refused({ type: "number" }, NaN),
+    "value must be a number",
   );
   assert.equal(
-    await refused({ type: "array", items: { type: "integer" } }, [1, "2"]),
-    "input[1] must be an integer",
+    refused({ type: "array", items: { type: "integer" } }, [1, "2"]),
+    "value[1] must be an integer",
   );
   // One emoji is one character, though it is two UTF-16 units.
   assert.equal(
-    await refused({ type: "string", maxLength: 1 }, "😀"),
+    refused({ type: "string", maxLength: 1 }, "😀"),
     undefined,
   );
   // With nothing said about other properties, they are let through.
   assert.equal(
-    await refused({ type: "object", properties: {} }, { anything: 1 }),
+    refused({ type: "object", properties: {} }, { anything: 1 }),
     undefined,
   );
 });
 
-test("tool(): a schema that says something unenforced is refused when the tool is made", () => {
-  const make = (schema: object) => () =>
-    tool({ name: "t", description: "", schema, run: () => "ok" });
+test("parse(): a schema that says something unenforced is refused, whatever the value", () => {
+  const make = (schema: object) => () => parse(schema, toronto.input);
   assert.throws(
     make({ type: "string", pattern: "^a" }),
     /"pattern" is not one this enforces/,
@@ -701,12 +936,41 @@ test("usage: each turn records what it cost, and totalUsage() adds a history up"
     output: 16,
     cacheRead: 80,
     cacheWrite: 0,
+    reasoning: 0,
   });
   // Turns that report nothing, and messages that are not turns, count as nothing.
   assert.deepEqual(
     totalUsage([user("hi"), { from: "model", content: [], end: "stop" }]),
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
   );
+});
+
+test("usage: reasoning is the part of the output spent reasoning, counted where a turn reports it", async () => {
+  const thought = (output: number, reasoning?: number): End => ({
+    type: "end",
+    reason: "stop",
+    usage: { input: 10, output, ...(reasoning !== undefined && { reasoning }) },
+  });
+  // Three turns: one that reasoned, one that says it did not, one that does not say.
+  const reply = await collect(
+    played(say("a"), thought(50, 40), say("b"), thought(7, 0), say("c"), thought(9)),
+  );
+  assert.deepEqual(
+    reply.map((turn) => turn.from === "model" && turn.usage),
+    [
+      { input: 10, output: 50, reasoning: 40 },
+      { input: 10, output: 7, reasoning: 0 },
+      { input: 10, output: 9 },
+    ],
+  );
+  // It is within the output, never beside it: the total written is `output` alone.
+  assert.deepEqual(totalUsage(reply), {
+    input: 30,
+    output: 66,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 40,
+  });
 });
 
 test("a paused turn is not an answer: text() throws, and no tools run", async () => {
@@ -755,25 +1019,6 @@ test("a paused turn goes back as it is, so the model can finish it", async () =>
     await text(played(say("Searching. "), paused, say("Found it."), stop)),
     "Searching. Found it.",
   );
-});
-
-test("abort: the signal reaches a running tool, and a cancelled call throws instead of answering", async () => {
-  const controller = new AbortController();
-  let seen: AbortSignal | undefined;
-  const slow = tool({
-    ...forecast,
-    run: (_input, { signal }) => {
-      seen = signal;
-      return new Promise<string>((_resolve, reject) =>
-        signal?.addEventListener("abort", () => reject(signal.reason)),
-      );
-    },
-  });
-  const running = runToolCall([slow], toronto, controller.signal);
-  controller.abort(new Error("stopped by the user"));
-  // No error result is made up for the model to read.
-  await assert.rejects(running, /stopped by the user/);
-  assert.equal(seen, controller.signal);
 });
 
 test("a step written against text alone accepts any richer provider", async () => {
@@ -955,16 +1200,20 @@ test("answerToolCalls() returns the very same history when every call is answere
 });
 
 // The shape of an answer: a field that may be missing is required and either itself or null.
-const triage = shape({
-  type: "object",
-  properties: {
-    category: { enum: ["billing", "bug", "other"] },
-    urgent: { type: "boolean" },
-    orderId: { anyOf: [{ type: "string" }, { type: "null" }] },
+const triage = {
+  schema: {
+    type: "object",
+    properties: {
+      category: { enum: ["billing", "bug", "other"] },
+      urgent: { type: "boolean" },
+      orderId: { anyOf: [{ type: "string" }, { type: "null" }] },
+    },
+    required: ["category", "urgent", "orderId"],
+    additionalProperties: false,
   },
-  required: ["category", "urgent", "orderId"],
-  additionalProperties: false,
-});
+} as const;
+// An answer arrives as text: JSON.parse reads it, and parse() checks what was read.
+const ticketOf = (answer: string) => parse(triage.schema, JSON.parse(answer));
 const threw = (run: () => unknown) => {
   try {
     run();
@@ -974,22 +1223,21 @@ const threw = (run: () => unknown) => {
   return undefined;
 };
 
-test("shape(): a request asks for it as plain data, and parse() reads the answer as text", async () => {
+test("a shape is plain data on the request, and the answer is text for JSON.parse and parse() to read", async () => {
   const written = '{"category":"bug","urgent":true,"orderId":null}';
   const provider = scripted<TextPart>([
     say(written.slice(0, 9)),
     say(written.slice(9)),
     stop,
   ]);
-  const ticket = triage.parse(
+  const ticket = ticketOf(
     await text(provider({ messages: [user("It crashes.")], shape: triage })),
   );
   assert.deepEqual(ticket, { category: "bug", urgent: true, orderId: null });
   // A provider that knows nothing of shapes was simply handed one more field.
   assert.equal(provider.seen[0]!.shape, triage);
-  // The schema is the one that was given, untouched, and a request needs nothing but it.
+  // A request needs nothing but the schema.
   const schema = { type: "string" };
-  assert.equal(shape(schema).schema, schema);
   assert.equal(
     await text(
       scripted([say('"hi"'), stop])({ messages: [], shape: { schema } }),
@@ -1002,67 +1250,297 @@ test("shape(): a request asks for it as plain data, and parse() reads the answer
       await collect(scripted([say(written), stop])({ messages: [] })),
     ),
   );
-  assert.deepEqual(triage.parse(turn.content[0].text), ticket);
+  assert.deepEqual(ticketOf(turn.content[0].text), ticket);
 });
 
-test("shape(): parse() throws unless the answer is JSON that fits, naming everything wrong", () => {
+test("parse() throws unless an answer fits, naming everything wrong; text that is not JSON never gets that far", () => {
+  // That is JSON.parse's to say, in its own words.
+  assert.throws(() => ticketOf("Sure! Here is the ticket."), SyntaxError);
+  assert.throws(() => ticketOf('{"category":"bug","urg'), SyntaxError);
   assert.equal(
-    threw(() => triage.parse("Sure! Here is the ticket.")),
-    "the answer is not JSON",
-  );
-  assert.equal(
-    threw(() => triage.parse('{"category":"bug","urg')),
-    "the answer is not JSON",
-  );
-  assert.equal(
-    threw(() => triage.parse('"bug"')),
-    "answer must be an object",
+    threw(() => ticketOf('"bug"')),
+    "value must be an object",
   );
   assert.equal(
     threw(() =>
-      triage.parse('{"category":"Bug","urgent":"yes","note":"x","orderId":7}'),
+      ticketOf('{"category":"Bug","urgent":"yes","note":"x","orderId":7}'),
     ),
     [
-      'answer.category must be "billing" or "bug" or "other"',
-      "answer.urgent must be a boolean",
-      "answer.orderId must be a string, or answer.orderId must be null",
-      "answer.note is not expected",
+      'category must be "billing" or "bug" or "other"',
+      "urgent must be a boolean",
+      "orderId must be a string, or orderId must be null",
+      "note is not expected",
     ].join("; "),
   );
   assert.equal(
-    threw(() => triage.parse('{"category":"bug","urgent":true}')),
-    "answer.orderId is missing",
+    threw(() => ticketOf('{"category":"bug","urgent":true}')),
+    "orderId is missing",
   );
-  const counts = shape({ type: "array", items: { type: "integer" } });
+  const counts = { type: "array", items: { type: "integer" } };
   assert.equal(
-    threw(() => counts.parse("[1,2.5]")),
-    "answer[1] must be an integer",
+    threw(() => parse(counts, [1, 2.5])),
+    "value[1] must be an integer",
   );
 });
 
-test("shape(): parse() is exact about null: where the schema does not accept one, it is wrong", () => {
-  const loose = shape({
-    type: "object",
-    properties: { note: { type: "string" } },
-  });
-  assert.deepEqual(loose.parse("{}"), {});
-  assert.deepEqual(loose.parse('{"note":"x"}'), { note: "x" });
+test("parse() is exact about null: where the schema does not accept one, it is wrong", () => {
+  const loose = (answer: string) =>
+    parse(
+      { type: "object", properties: { note: { type: "string" } } },
+      JSON.parse(answer),
+    );
+  assert.deepEqual(loose("{}"), {});
+  assert.deepEqual(loose('{"note":"x"}'), { note: "x" });
   // Left out is not the same as null: an optional property is either absent or what its schema says.
   assert.equal(
-    threw(() => loose.parse('{"note":null}')),
-    "answer.note must be a string",
+    threw(() => loose('{"note":null}')),
+    "note must be a string",
   );
 });
 
-test("shape(): a schema that says something unenforced is refused when the shape is made", () => {
-  assert.throws(
-    () => shape({ type: "string", pattern: "^a" }),
-    /"pattern" is not one this enforces/,
+test("a schema that says something unenforced is a schema error, whatever was to be read against it", () => {
+  const thrown = (run: () => unknown): unknown => {
+    try {
+      run();
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  };
+  const pattern = { type: "string", pattern: "^a" };
+  // Whether or not the value fits what the schema does enforce: the schema is what is wrong.
+  const fits = thrown(() => parse(pattern, "abc"));
+  const fitsNot = thrown(() => parse(pattern, toronto.input));
+  for (const error of [fits, fitsNot]) {
+    assert.equal(isSchemaError(error), true);
+    assert.match(String(error), /"pattern" is not one this enforces/);
+  }
+  assert.equal(
+    isSchemaError(
+      thrown(() => parse({ type: ["string", "null"] }, "a")),
+    ),
+    true,
   );
-  assert.throws(
-    () => shape({ type: "object", properties: { when: { format: "date" } } }),
-    /"format"/,
+  // What a model got wrong is not one, and neither is anything else that is thrown.
+  assert.equal(isSchemaError(thrown(() => ticketOf("{}"))), false);
+  assert.equal(isSchemaError(thrown(() => ticketOf("not JSON"))), false);
+  assert.equal(
+    isSchemaError(
+      thrown(() => parse(weather.schema, { city: 42 })),
+    ),
+    false,
   );
+  assert.equal(isSchemaError(new TypeError("x is undefined")), false);
+  assert.equal(isSchemaError("SchemaError"), false);
+  // It goes by its name: anything by that name will do, whoever threw it.
+  assert.equal(isSchemaError({ name: "SchemaError", message: "x" }), true);
+  // Where a result is made, it is let through and not told to the model.
+  const strict = (c: ToolCall) => {
+    try {
+      return toolResult(c, String(parse(pattern, c.input)));
+    } catch (error) {
+      if (isSchemaError(error)) throw error;
+      return toolFailure(c, error);
+    }
+  };
+  assert.throws(() => strict(toronto), /^SchemaError: schema: /);
+});
+
+// ── JSON that is still being written ────────────────────────────────────────
+
+// Documents of every kind of value, written tight and written spaced out.
+const documents = [
+  {
+    path: "notes/rain.txt",
+    text: 'Soft rain.\n\t"Quoted" \\ and / and é and 😀.',
+    lines: [1, -2.5, 3e21, 0, -0.0001],
+    flags: { done: true, draft: false, owner: null },
+    nested: [[], {}, [[1, "a"], { b: [null] }], ""],
+  },
+  ["a", ["b", ["c"]], { d: "e" }],
+  "just a string",
+  true,
+  null,
+  {},
+  [],
+].flatMap((value) => [JSON.stringify(value), JSON.stringify(value, null, 2)]);
+// Whether `more` is `less` grown: strings longer, objects and arrays with more in them, all else the same.
+const grown = (less: unknown, more: unknown): boolean => {
+  if (less === undefined) return true;
+  if (typeof less === "string")
+    return typeof more === "string" && more.startsWith(less);
+  if (Array.isArray(less))
+    return (
+      Array.isArray(more) &&
+      less.length <= more.length &&
+      less.every((item, i) => grown(item, more[i]))
+    );
+  if (typeof less === "object" && less !== null)
+    return (
+      typeof more === "object" &&
+      more !== null &&
+      !Array.isArray(more) &&
+      Object.entries(less).every(
+        ([key, held]) =>
+          Object.hasOwn(more, key) &&
+          grown(held, (more as Record<string, unknown>)[key]),
+      )
+    );
+  return less === more;
+};
+const beginnings = (text: string) =>
+  Array.from({ length: text.length + 1 }, (_, n) => text.slice(0, n));
+
+test("partial() reads a whole document exactly as JSON.parse does", () => {
+  for (const text of documents)
+    assert.deepEqual(partial(text), JSON.parse(text));
+  for (const text of [
+    "0",
+    "-0",
+    "12",
+    "-1.5e-3",
+    "1E+2",
+    " \n 7 \t",
+    '"\\u00e9\\ud83d\\ude00\\/"',
+    '{"a":1,"a":2,"b":3}',
+    '{"__proto__":{"x":1}}',
+  ])
+    assert.deepEqual(partial(text), JSON.parse(text));
+  // A property named __proto__ is a property, as JSON.parse makes it, and nothing more.
+  const named = partial('{"__proto__":{"x":1}}') as Record<string, unknown>;
+  assert.ok(Object.hasOwn(named, "__proto__"));
+  assert.equal(Object.getPrototypeOf(named), Object.prototype);
+  assert.ok(Object.is(partial("-0"), -0));
+});
+
+test("partial() reads every beginning of a document, and what it reads only grows", () => {
+  for (const text of documents) {
+    const read = beginnings(text).map(partial);
+    read.forEach((value, n) => {
+      if (n === 0) return;
+      assert.ok(
+        grown(read[n - 1], value),
+        `${JSON.stringify(text.slice(0, n))} lost something the text before it held`,
+      );
+    });
+    assert.deepEqual(read.at(-1), JSON.parse(text));
+  }
+});
+
+test("partial(): a string is there as far as it is written, and anything else unfinished is left out", () => {
+  // Nothing to read yet.
+  assert.equal(partial(""), undefined);
+  assert.equal(partial("  \n"), undefined);
+  assert.deepEqual(partial("{"), {});
+  assert.deepEqual(partial("["), []);
+  // A string grows; an escape cut short says nothing until it is whole.
+  assert.equal(partial('"'), "");
+  assert.equal(partial('"Soft ra'), "Soft ra");
+  assert.equal(partial('"a\\'), "a");
+  assert.equal(partial('"a\\u00e'), "a");
+  assert.equal(partial('"a\\u00e9'), "aé");
+  assert.deepEqual(partial('{"text":"Soft ra'), { text: "Soft ra" });
+  assert.deepEqual(partial('["a","b'), ["a", "b"]);
+  // A property's name is not a property, and neither is a name with no value yet.
+  assert.deepEqual(partial('{"pa'), {});
+  assert.deepEqual(partial('{"path"'), {});
+  assert.deepEqual(partial('{"path":'), {});
+  assert.deepEqual(partial('{"a":1,"pa'), { a: 1 });
+  // A number is whole once something follows it: until then it may gain digits.
+  assert.deepEqual(partial('{"n":1'), {});
+  assert.deepEqual(partial('{"n":10'), {});
+  assert.deepEqual(partial('{"n":104,'), { n: 104 });
+  assert.deepEqual(partial('{"n":104}'), { n: 104 });
+  assert.deepEqual(partial("[1,2"), [1]);
+  assert.deepEqual(partial("[1,2 "), [1, 2]);
+  assert.deepEqual(partial("[-"), []);
+  assert.deepEqual(partial("[1.5e"), []);
+  // Half a word is no value.
+  assert.deepEqual(partial('{"ok":tr'), {});
+  assert.deepEqual(partial('{"ok":true'), { ok: true });
+  assert.deepEqual(partial("[nul"), []);
+  assert.deepEqual(partial("[null"), [null]);
+  // A document that is a bare number is read as it stands, the one thing that does not only grow.
+  assert.equal(partial("1"), 1);
+  assert.equal(partial("12"), 12);
+  assert.equal(partial("12."), undefined);
+  assert.equal(partial("-"), undefined);
+  assert.equal(partial("tru"), undefined);
+});
+
+test("partial() throws on text that no JSON document begins with, as JSON.parse does", () => {
+  for (const text of [
+    "x",
+    "tx",
+    "nul1",
+    "01",
+    "+1",
+    "1.e5",
+    "1.5.2",
+    "[1,]",
+    "[1 2",
+    "[,",
+    '{"a" 1',
+    '{"a":1,}',
+    "{,",
+    "{a",
+    '{"a":1}}',
+    '{"a":1} x',
+    '"a\\x"',
+    '"a\\u00zz"',
+    '"line\nbreak"',
+    "[1]]",
+    "undefined",
+  ]) {
+    assert.throws(() => partial(text), SyntaxError, text);
+    assert.throws(() => JSON.parse(text), SyntaxError, text);
+  }
+  assert.throws(
+    () => partial('{"a" 1'),
+    /^SyntaxError: not the beginning of JSON: unexpected "1" at 5$/,
+  );
+});
+
+test("partial() reads a tool call's input and a shaped answer while they are being written", async () => {
+  // A call's input: the one growing part of a reply still arriving.
+  const add = append<ToolInputPart | ToolCall>;
+  const empty: Reply<ToolInputPart | ToolCall> = [];
+  const seen = [
+    writes("1", "get_weather", ""),
+    writes("1", "get_weather", '{"city":"Tor'),
+    writes("1", "get_weather", 'onto","days":'),
+    writes("1", "get_weather", "3}"),
+  ].map(
+    (
+      (reply) => (piece) =>
+        (reply = add(reply, piece))
+    )(empty),
+  );
+  assert.deepEqual(
+    seen.map((reply) => {
+      const part = reply[0]?.content.at(-1);
+      return part && isToolInput(part) ? partial(part.text) : part;
+    }),
+    [undefined, { city: "Tor" }, { city: "Toronto" }, { city: "Toronto", days: 3 }],
+  );
+
+  // An answer asked for in a shape: text like any other, read as it grows.
+  const pieces = ['{"category":"bil', 'ling","urgent":tr', 'ue,"orderId":null}'];
+  let written = "";
+  const read: unknown[] = [];
+  for await (const chunk of played(...pieces.map(say), stop)) {
+    if (!isText(chunk)) continue;
+    written += chunk.text;
+    read.push(partial(written));
+  }
+  assert.deepEqual(read, [
+    { category: "bil" },
+    { category: "billing" },
+    { category: "billing", urgent: true, orderId: null },
+  ]);
+  // Unfinished, it does not fit the schema, and nothing says it does. Finished, it is read as ever.
+  assert.throws(() => parse(triage.schema, read[0]));
+  assert.deepEqual(ticketOf(written), read.at(-1));
 });
 
 // Every schema a walk visited, in order, as the place it sits and the keywords it holds.
@@ -1164,16 +1642,14 @@ test("fitSchema() refuses by letting fit throw, and leaves alone what is not a s
   );
 });
 
-// What a schema gives `run`, as the compiler sees it. `npm run typecheck` fails if one of these types is off.
+// What a schema gives `parse`, as the compiler sees it. `npm run typecheck` fails if one of these types is off.
 type Same<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
     ? true
     : false;
 export const typed = () => {
-  tool({
-    name: "search",
-    description: "",
-    schema: {
+  const input = parse(
+    {
       type: "object",
       properties: {
         query: { type: "string", minLength: 1 },
@@ -1195,29 +1671,28 @@ export const typed = () => {
       },
       required: ["query", "region"],
     },
-    run: (input) => {
-      type Expected = {
-        query: string;
-        region: string | null;
-        limit?: number;
-        ratio?: number;
-        exact?: boolean;
-        sort?: "recent" | "relevant";
-        kind?: "web";
-        sites?: string[];
-        tags?: unknown[];
-        where?: { lat: number };
-        extra?: { [key: string]: unknown };
-        anything?: unknown;
-      };
-      const same: Same<typeof input, Expected> = true;
-      // @ts-expect-error a string is not a number
-      const wrong: number = input.query;
-      return String(same) + String(wrong);
-    },
-  });
-  // A shape types what parse() returns, the way a tool's schema types its input.
-  const ticket = triage.parse("");
+    toronto.input,
+  );
+  type Expected = {
+    query: string;
+    region: string | null;
+    limit?: number;
+    ratio?: number;
+    exact?: boolean;
+    sort?: "recent" | "relevant";
+    kind?: "web";
+    sites?: string[];
+    tags?: unknown[];
+    where?: { lat: number };
+    extra?: { [key: string]: unknown };
+    anything?: unknown;
+  };
+  const same: Same<typeof input, Expected> = true;
+  // @ts-expect-error a string is not a number
+  const wrong: number = input.query;
+  String(same) + String(wrong);
+  // An answer's schema types what parse() returns, the way a tool's schema types its input.
+  const ticket = ticketOf("");
   type Ticket = {
     category: "billing" | "bug" | "other";
     urgent: boolean;
@@ -1233,15 +1708,9 @@ export const typed = () => {
     properties: { city: { type: "string" } },
     required: ["city"],
   };
-  tool({
-    name: "t",
-    description: "",
-    schema: widened,
-    run: (input) => {
-      const same: Same<typeof input, unknown> = true;
-      return String(same);
-    },
-  });
+  const loose = parse(widened, toronto.input);
+  const sameLoose: Same<typeof loose, unknown> = true;
+  String(sameLoose);
 };
 
 // Histories that must not compile. `npm run typecheck` fails if one starts to.

@@ -1,7 +1,7 @@
 // Searching the web, as a tool the model may call. Written against one thing
 // it needs: something that searches. Where the results come from is an
 // adapter's business; see cloudflare.ts.
-import { tool, type Tool } from '@ai-agent-library/library';
+import { parse, type ToolCall, type ToolSpec } from '@ai-agent-library/library';
 
 /** One search result. */
 export type Found = { url: string; title: string; description: string };
@@ -29,33 +29,41 @@ export const listed = (found: readonly Found[]): string =>
         )
         .join('\n\n');
 
-/** The tool. The model decides when a question needs it; the description is what it goes by. */
-export const webSearch = (search: Search): Tool =>
-  tool({
-    name: 'web_search',
-    description:
-      'Search the web and get back titles, addresses and descriptions of matching pages. ' +
-      'Use it when the answer depends on recent events, on live or changing facts such as prices, versions or schedules, ' +
-      'or on something you are not sure of and a page could settle. ' +
-      'Do not use it for what you already know well, or for reasoning, writing or mathematics. ' +
-      'When you rely on a result, give its address.',
-    schema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          minLength: 1,
-          maxLength: QUERY_LENGTH,
-          description: 'What to search for, as you would type it into a search engine.',
-        },
+/** What the model is told of the search. It decides when a question needs it; the description is what it goes by. */
+const told = {
+  name: 'web_search',
+  description:
+    'Search the web and get back titles, addresses and descriptions of matching pages. ' +
+    'Use it when the answer depends on recent events, on live or changing facts such as prices, versions or schedules, ' +
+    'or on something you are not sure of and a page could settle. ' +
+    'Do not use it for what you already know well, or for reasoning, writing or mathematics. ' +
+    'When you rely on a result, give its address.',
+  schema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        minLength: 1,
+        maxLength: QUERY_LENGTH,
+        description: 'What to search for, as you would type it into a search engine.',
       },
-      required: ['query'],
-      additionalProperties: false,
     },
-    run: async ({ query }, { signal }) => {
-      // A schema cannot say "not only spaces", so that is checked here. A throw goes back to the model.
-      const wanted = query.trim();
-      if (wanted === '') throw new Error('query must not be empty');
-      return listed(await search(wanted, signal));
-    },
-  });
+    required: ['query'],
+    additionalProperties: false,
+  },
+} as const satisfies ToolSpec;
+
+/** What the model is told of the search, and what a call to it does. Throws if the input does not fit or the search fails. */
+export type WebSearch = ToolSpec & { run: (call: ToolCall, signal?: AbortSignal) => Promise<string> };
+
+/** The tool, searching with whatever it is given to search with. */
+export const webSearch = (search: Search): WebSearch => ({
+  ...told,
+  run: async (call, signal) => {
+    const { query } = parse(told.schema, call.input);
+    // A schema cannot say "not only spaces", so that is checked here.
+    const wanted = query.trim();
+    if (wanted === '') throw new Error('query must not be empty');
+    return listed(await search(wanted, signal));
+  },
+});

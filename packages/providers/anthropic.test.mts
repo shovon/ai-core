@@ -1,25 +1,37 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic, type AnthropicMessage } from "./anthropic.ts";
 import {
+  anthropic,
+  type AnthropicMessage,
+  type AnthropicOut,
+  type AnthropicTool,
+} from "./anthropic.ts";
+import {
+  append,
   collect,
   file,
-  model,
+  isSource,
+  isText,
+  isToolInput,
+  parse,
   pendingToolCalls,
-  runToolCall,
-  shape,
   text,
-  tool,
+  toolResult,
+  totalUsage,
   user,
   type NativePart,
+  type Part,
   type PortableMessage,
   type Provider,
   type ReasoningPart,
+  type Reply,
   type Request,
+  type SourcePart,
   type TextPart,
-  type Tool,
   type ToolCall,
+  type ToolInputPart,
+  type ToolSpec,
 } from "@ai-agent-library/library";
 
 // The real SDK, with fetch replaced by canned server-sent-event replies.
@@ -130,15 +142,57 @@ const client = (sent: any[], ...replies: string[]) =>
     },
   });
 const options = { model: "claude-opus-5-5", max_tokens: 1024 };
-const weather: Tool = {
+const weather: ToolSpec = {
   name: "get_weather",
   description: "Weather.",
   schema: { type: "object" },
-  run: () => "18C",
 };
+// Running a tool is the caller's business: here every call comes to the same thing.
+const answered = (call: ToolCall) => toolResult(call, "18C");
 const blocks = (m: any) => m.content.map((b: any) => b.type).join("+");
 
-test("reply: text streams; tool calls arrive whole; thinking is told as reasoning and arrives whole as a native part", async () => {
+test("a tool call is told as it is written: that it has begun, each piece of its input, then the call itself, whole", async () => {
+  const provider = anthropic(client([], thinksThenCalls), options);
+  const chunks: object[] = [];
+  let reply: Reply<AnthropicOut> = [];
+  const growing: unknown[] = [];
+  for await (const chunk of provider({ messages: [user("weather?")] })) {
+    chunks.push(chunk);
+    reply = append(reply, chunk);
+    growing.push(reply[0]?.content.at(-1));
+  }
+  const writes = (text: string) => ({
+    type: "tool_input",
+    id: "toolu_1",
+    name: "get_weather",
+    text,
+  });
+  const called = {
+    type: "tool_call",
+    id: "toolu_1",
+    name: "get_weather",
+    input: { city: "Toronto" },
+  };
+  // From the call's beginning to the call itself, in order; only the turn's end comes after.
+  assert.deepEqual(chunks.slice(-5, -1), [
+    writes(""),
+    writes('{"city":'),
+    writes('"Toronto"}'),
+    called,
+  ]);
+  assert.equal((chunks.at(-1) as { type: string }).type, "end");
+  // Folded as it arrives, the input is one part that grows, and the call takes its place.
+  assert.deepEqual(growing.slice(-5), [
+    writes(""),
+    writes('{"city":'),
+    writes('{"city":"Toronto"}'),
+    called,
+    called,
+  ]);
+  assert.ok(!reply[0]?.content.some(isToolInput));
+});
+
+test("reply: text streams; a tool call is left whole; thinking is told as reasoning and arrives whole as a native part", async () => {
   const provider = anthropic(client([], thinksThenCalls), options);
   const reply = await collect(provider({ messages: [user("weather?")] }));
   assert.equal(reply.length, 1);
@@ -321,9 +375,7 @@ test("a reply, its tool results and the next reply continue the conversation wit
   messages.push(...(await collect(claude({ messages, tools: [weather] }))));
   messages.push({
     from: "tool",
-    content: await Promise.all(
-      pendingToolCalls(messages).map((call) => runToolCall([weather], call)),
-    ),
+    content: pendingToolCalls(messages).map(answered),
   });
   messages.push(...(await collect(claude({ messages, tools: [weather] }))));
   messages.push(user("and tomorrow?"));
@@ -381,7 +433,12 @@ test("one history across two providers: each gets its own private parts back, an
   const hit = async (
     provider: Provider<
       PortableMessage,
-      TextPart | ReasoningPart | ToolCall | NativePart
+      | TextPart
+      | SourcePart
+      | ReasoningPart
+      | ToolInputPart
+      | ToolCall
+      | NativePart
     >,
     prompt: string,
   ) => {
@@ -666,9 +723,9 @@ test("the system prompt can be text parts, each with its own cache breakpoint", 
   assert.equal(sent[1].system, "Be brief.");
   await collect(provider({ system: [], messages }));
   assert.equal("system" in sent[2], false);
-  // Written inline, hints are checked and sent through the string sugar as well.
-  await text(
-    model(provider)({
+  // Written inline, hints are checked and sent as well.
+  await collect(
+    provider({
       system: [{ type: "text", text: "Rules.", anthropic: rules.anthropic }],
       messages,
     }),
@@ -762,6 +819,164 @@ test("automatic caching is a provider option and reaches the request as is", asy
   assert.deepEqual(sent[0].cache_control, { type: "ephemeral" });
 });
 
+test("a tool's settings for Anthropic are sent as they are, beside what the tool is", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  // Written the way a tool is: one value, typed by its schema, with Anthropic's settings on it.
+  const strict = {
+    name: "get_weather",
+    description: "Weather.",
+    schema: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+      additionalProperties: false,
+    },
+    anthropic: {
+      strict: true,
+      eager_input_streaming: true,
+      cache_control: { type: "ephemeral" },
+    },
+  } as const satisfies AnthropicTool;
+  await collect(provider({ messages: [user("hi")], tools: [strict, weather] }));
+  assert.deepEqual(sent[0].tools, [
+    {
+      name: "get_weather",
+      description: "Weather.",
+      input_schema: strict.schema,
+      strict: true,
+      eager_input_streaming: true,
+      cache_control: { type: "ephemeral" },
+    },
+    // A tool with no settings goes as it always did.
+    {
+      name: "get_weather",
+      description: "Weather.",
+      input_schema: { type: "object" },
+    },
+  ]);
+  // The schema still types and checks a call's input, settings or none.
+  const city: string = parse(strict.schema, { city: "Toronto" }).city;
+  assert.equal(city, "Toronto");
+});
+
+test("a tool's settings cannot replace what the tool is, and a field for another provider is not sent", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok")), options);
+  // Held in a variable, a tool may carry more than the type knows, as one read from storage might.
+  const tool = {
+    ...weather,
+    anthropic: {
+      input_examples: [{ city: "Toronto" }],
+      name: "replaced",
+      description: "Replaced.",
+      input_schema: { type: "string" },
+    },
+    other: { parallel: false },
+  };
+  // Any provider's request type takes it: the field rides along unseen.
+  const portable: Provider<PortableMessage, Part> = provider;
+  await collect(portable({ messages: [user("hi")], tools: [tool] }));
+  assert.deepEqual(sent[0].tools, [
+    {
+      name: "get_weather",
+      description: "Weather.",
+      input_schema: { type: "object" },
+      input_examples: [{ city: "Toronto" }],
+    },
+  ]);
+});
+
+test("a turn ends with Anthropic's account of the response: its id and model, and the message itself without its content", async () => {
+  const sent: any[] = [];
+  // A reply that stopped on a stop sequence, from a response that names its request.
+  const stopped = sse([
+    start,
+    ...speaks(0, "One, two,"),
+    {
+      type: "message_delta",
+      delta: { stop_reason: "stop_sequence", stop_sequence: " three" },
+      usage: { output_tokens: 5 },
+    },
+    { type: "message_stop" },
+  ]);
+  const replies = [stopped, says("ok")];
+  const provider = anthropic(
+    new Anthropic({
+      apiKey: "test",
+      fetch: async (_url, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return new Response(replies[sent.length - 1], {
+          headers: {
+            "content-type": "text/event-stream",
+            "request-id": `req_${sent.length}`,
+          },
+        });
+      },
+    }),
+    options,
+  );
+  const messages: AnthropicMessage[] = [user("count")];
+  const chunks: object[] = [];
+  let reply: Reply<AnthropicOut> = [];
+  for await (const chunk of provider({ messages })) {
+    chunks.push(chunk);
+    reply = append(reply, chunk);
+  }
+  const account = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    model: "m",
+    stop_reason: "stop_sequence",
+    stop_sequence: " three",
+    usage: { input_tokens: 1, output_tokens: 5 },
+    request_id: "req_1",
+  };
+  assert.deepEqual(chunks.at(-1), {
+    type: "end",
+    reason: "stop",
+    usage: { input: 1, output: 5, cacheRead: 0, cacheWrite: 0 },
+    id: "msg_1",
+    model: "m",
+    anthropic: account,
+  });
+
+  // Folded, it is on the turn, and typed there: which stop sequence it was is read by name.
+  messages.push(...reply);
+  const turn = messages[1];
+  assert.ok(turn?.from === "model");
+  assert.deepEqual([turn.id, turn.model], ["msg_1", "m"]);
+  assert.deepEqual(turn.anthropic, account);
+  const matched: string | null | undefined = turn.anthropic?.stop_sequence;
+  const request: string | null | undefined = turn.anthropic?.request_id;
+  assert.deepEqual([matched, request], [" three", "req_1"]);
+  // It is plain data: stored and loaded, the turn is equal.
+  assert.deepEqual(JSON.parse(JSON.stringify(turn)), turn);
+
+  // None of it is sent back: a turn goes out as its role and content alone.
+  messages.push(user("go on"));
+  await collect(provider({ messages }));
+  assert.deepEqual(sent[1].messages[1], {
+    role: "assistant",
+    content: [{ type: "text", text: "One, two," }],
+  });
+});
+
+test("a response that does not name its request still ends with the rest of the account", async () => {
+  const provider = anthropic(client([], says("ok")), options);
+  const [turn] = await collect(provider({ messages: [user("hi")] }));
+  assert.ok(turn?.from === "model");
+  const kept: AnthropicMessage = turn;
+  assert.ok(kept.from === "model");
+  assert.equal(kept.anthropic?.request_id, null);
+  assert.equal(kept.anthropic?.stop_reason, "end_turn");
+  // What the SDK left undefined is left out, not kept as a hole.
+  assert.ok(
+    Object.values(kept.anthropic ?? {}).every((value) => value !== undefined),
+  );
+});
+
 test("usage: each turn reports what it cost, with cached tokens counted into the input", async () => {
   const plain = anthropic(client([], says("ok")), options);
   const [turn] = await collect(plain({ messages: [user("hi")] }));
@@ -799,6 +1014,45 @@ test("usage: each turn reports what it cost, with cached tokens counted into the
   });
 });
 
+test("usage: thinking tokens are told as reasoning, within the output, when Anthropic says how many", async () => {
+  // As the API ends a turn that thought: the count comes with the final usage.
+  const thought = sse([
+    start,
+    ...thinks,
+    ...speaks(1, "Blue."),
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 50, output_tokens_details: { thinking_tokens: 40 } },
+    },
+    { type: "message_stop" },
+  ]);
+  const provider = anthropic(client([], thought, says("ok")), options);
+  const messages: AnthropicMessage[] = [user("a colour?")];
+  messages.push(...(await collect(provider({ messages }))));
+  const turn = messages[1];
+  assert.ok(turn?.from === "model");
+  assert.deepEqual(turn.usage, {
+    input: 1,
+    output: 50,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 40,
+  });
+  // Anthropic's own count is there beside it, with whatever else it reports.
+  assert.deepEqual(turn.anthropic?.usage.output_tokens_details, {
+    thinking_tokens: 40,
+  });
+
+  // A turn Anthropic gives no such count for reports none, and adds nothing to the total.
+  messages.push(user("thanks"));
+  messages.push(...(await collect(provider({ messages }))));
+  const last = messages.at(-1);
+  assert.ok(last?.from === "model" && last.usage);
+  assert.equal("reasoning" in last.usage, false);
+  assert.equal(totalUsage(messages).reasoning, 40);
+});
+
 test("stop reasons: a paused turn is 'pause', one this version does not know is 'unknown', never 'stop'", async () => {
   const ending = async (stop_reason: string) => {
     const provider = anthropic(
@@ -832,12 +1086,16 @@ test("each turn ends exactly once, after everything else", async () => {
   for await (const chunk of provider({ messages: [user("weather?")] }))
     types.push(chunk.type);
   // Thinking: that it began, what was shown of it, then the block itself.
+  // A call: that it began, each piece of its input, then the call itself.
   assert.deepEqual(types, [
     "reasoning",
     "reasoning",
     "native",
     "text",
     "text",
+    "tool_input",
+    "tool_input",
+    "tool_input",
     "tool_call",
     "end",
   ]);
@@ -900,15 +1158,11 @@ test("a large file's bytes are encoded without Buffer and match it byte for byte
 
 test("a history is plain JSON: stored and loaded, it is equal and sends the same request", async () => {
   const sent: any[] = [];
-  const snapshot = tool({
+  const snapshot: ToolSpec = {
     name: "get_weather",
     description: "Weather, with a chart.",
     schema: { type: "object" },
-    run: () => [
-      { type: "text", text: "18C" },
-      file("image/png", new Uint8Array([9, 9])),
-    ],
-  });
+  };
   const claude = anthropic(
     client(sent, thinksThenCalls, says("It is 18C."), says("x"), says("y")),
     options,
@@ -928,8 +1182,11 @@ test("a history is plain JSON: stored and loaded, it is equal and sends the same
   messages.push(...(await collect(claude({ messages, tools: [snapshot] }))));
   messages.push({
     from: "tool",
-    content: await Promise.all(
-      pendingToolCalls(messages).map((call) => runToolCall([snapshot], call)),
+    content: pendingToolCalls(messages).map((call) =>
+      toolResult(call, [
+        { type: "text", text: "18C" },
+        file("image/png", new Uint8Array([9, 9])),
+      ]),
     ),
   });
   messages.push(...(await collect(claude({ messages, tools: [snapshot] }))));
@@ -1055,36 +1312,303 @@ test("a part with no known type and no provider name is rejected here, and nothi
   assert.equal(sent.length, 0);
 });
 
-test("model() still accepts files through the sugar", async () => {
-  const sent: any[] = [];
-  const ask = model(anthropic(client(sent, says("a cat")), options));
-  const picture = file("image/png", new Uint8Array([1]));
-  assert.equal(
-    await text(ask({ messages: [user(picture, "what is this?")] })),
-    "a cat",
-  );
-  assert.equal(blocks(sent[0].messages[0]), "image+text");
-});
-
 test("a file type Anthropic cannot take is an error, not a silent drop", async () => {
   const provider = anthropic(client([]), options);
   const audio = user(file("audio/wav", new Uint8Array()));
   await assert.rejects(collect(provider({ messages: [audio] })), /audio\/wav/);
 });
 
+test("a file a model made, in another provider's turn, goes to Anthropic as a file does anywhere", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("A cat.")), options);
+  // A portable history in which some other model drew a picture.
+  const drawn = file("image/png", new Uint8Array([1, 2, 3]));
+  const messages: PortableMessage[] = [
+    user("draw a cat"),
+    {
+      from: "model",
+      content: [{ type: "text", text: "Here it is." }, drawn],
+      end: "stop",
+    },
+    user("what did you draw?"),
+  ];
+  await collect(provider({ messages }));
+  assert.deepEqual(sent[0].messages[1], {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Here it is." },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "AQID" },
+      },
+    ],
+  });
+  // A kind Anthropic cannot take is an error there too, never a silent drop.
+  const sung: PortableMessage = {
+    from: "model",
+    content: [file("audio/wav", new Uint8Array())],
+    end: "stop",
+  };
+  await assert.rejects(
+    collect(provider({ messages: [user("sing"), sung, user("again")] })),
+    /audio\/wav/,
+  );
+  assert.equal(sent.length, 1);
+});
+
+// ── Documents and sources ───────────────────────────────────────────────────
+
+test("a file's settings for Anthropic go on a document as they are; an image takes only its cache breakpoint", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok")), options);
+  const settings = {
+    citations: { enabled: true },
+    title: "Q3 report",
+    context: "Unaudited.",
+    cache_control: { type: "ephemeral" },
+  } as const;
+  const messages: AnthropicMessage[] = [
+    user(
+      { ...file("application/pdf", new Uint8Array([1, 2, 3])), anthropic: settings },
+      { ...file("image/png", new Uint8Array([1, 2, 3])), anthropic: settings },
+      "What drove the margin change?",
+    ),
+  ];
+  await collect(provider({ messages }));
+  assert.deepEqual(sent[0].messages[0].content.slice(0, 2), [
+    {
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: "AQID" },
+      ...settings,
+    },
+    {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "AQID" },
+      cache_control: { type: "ephemeral" },
+    },
+  ]);
+});
+
+test("a text file goes to Anthropic as a document holding the text itself", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  const words = "Freight rose 31%.\nCafé margins held. 🚚";
+  const notes = {
+    ...file("text/plain", new TextEncoder().encode(words)),
+    anthropic: { citations: { enabled: true }, title: "Notes" },
+  };
+  await collect(provider({ messages: [user(notes, "Summarise.")] }));
+  assert.deepEqual(sent[0].messages[0].content[0], {
+    type: "document",
+    source: { type: "text", media_type: "text/plain", data: words },
+    citations: { enabled: true },
+    title: "Notes",
+  });
+  // Anthropic has no way to be given one by link, so that is said here, and nothing is sent.
+  const linked = user(file("text/plain", new URL("https://example.com/a.txt")));
+  await assert.rejects(
+    collect(provider({ messages: [linked] })),
+    /^Error: anthropic: cannot send a text\/plain file by link$/,
+  );
+  assert.equal(sent.length, 1);
+
+  // Inside a tool result no hint is read: the file goes, its settings do not.
+  const call: ToolCall = { type: "tool_call", id: "toolu_1", name: "read", input: {} };
+  await collect(
+    provider({
+      messages: [
+        user("read it"),
+        { from: "model", content: [call], end: "stop" },
+        { from: "tool", content: [toolResult(call, [notes])] },
+      ],
+      tools: [weather],
+    }),
+  );
+  assert.deepEqual(sent[1].messages[2].content[0].content, [
+    {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: words },
+    },
+  ]);
+});
+
+// A reply that cites: plain text, then a passage resting on two citations, then plain text again.
+const onPage: Anthropic.CitationPageLocation = {
+  type: "page_location",
+  cited_text: "Freight expense rose 31%.",
+  document_index: 0,
+  document_title: "Q3 report",
+  start_page_number: 4,
+  end_page_number: 5,
+  file_id: null,
+};
+const onWeb: Anthropic.CitationsWebSearchResultLocation = {
+  type: "web_search_result_location",
+  cited_text: "Container rates doubled.",
+  encrypted_index: "abc",
+  title: "Shipping news",
+  url: "https://example.com/rates",
+};
+const citing = sse([
+  start,
+  ...speaks(0, "Margins fell, "),
+  {
+    type: "content_block_start",
+    index: 1,
+    content_block: { type: "text", text: "", citations: [] },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "citations_delta", citation: onPage },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "text_delta", text: "mainly on " },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "citations_delta", citation: onWeb },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "text_delta", text: "freight." },
+  },
+  { type: "content_block_stop", index: 1 },
+  ...speaks(2, " Pricing was flat."),
+  ...finish("end_turn"),
+]);
+const pageSource = {
+  type: "source",
+  span: 18,
+  quote: "Freight expense rose 31%.",
+  title: "Q3 report",
+  anthropic: onPage,
+};
+const webSource = {
+  type: "source",
+  span: 18,
+  quote: "Container rates doubled.",
+  title: "Shipping news",
+  url: "https://example.com/rates",
+  anthropic: onWeb,
+};
+
+test("what a passage rests on is told as sources, directly after its text, each with how much text is its own", async () => {
+  const provider = anthropic(client([], citing), options);
+  const chunks: object[] = [];
+  for await (const chunk of provider({ messages: [user("margins?")] }))
+    chunks.push(chunk);
+  assert.deepEqual(chunks.slice(0, -1), [
+    { type: "text", text: "Margins fell, " },
+    { type: "text", text: "mainly on " },
+    { type: "text", text: "freight." },
+    pageSource,
+    webSource,
+    { type: "text", text: " Pricing was flat." },
+  ]);
+
+  // Folded, the passage has joined the text before it, and the span still says which part is cited.
+  const [turn] = await collect(
+    anthropic(client([], citing), options)({ messages: [user("margins?")] }),
+  );
+  assert.ok(turn?.from === "model");
+  assert.deepEqual(turn.content, [
+    { type: "text", text: "Margins fell, mainly on freight." },
+    pageSource,
+    webSource,
+    { type: "text", text: " Pricing was flat." },
+  ]);
+  const [said, first] = turn.content;
+  assert.ok(said && isText(said) && first && isSource(first));
+  assert.equal(said.text.slice(-(first.span ?? 0)), "mainly on freight.");
+  // Anthropic's own citation keeps its type: narrowing reaches the pages.
+  assert.ok(first.anthropic.type === "page_location");
+  assert.equal(first.anthropic.start_page_number, 4);
+  assert.equal(
+    await text(anthropic(client([], citing), options)({ messages: [] })),
+    "Margins fell, mainly on freight. Pricing was flat.",
+  );
+});
+
+test("Anthropic's own sources go back as citations on the passage they support, and no one else's are sent", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, citing, says("ok"), says("ok")), options);
+  const messages: AnthropicMessage[] = [user("margins?")];
+  messages.push(...(await collect(provider({ messages }))), user("go on"));
+  await collect(provider({ messages }));
+  // The passage is its own block again, with both citations; the text around it has none.
+  assert.deepEqual(sent[1].messages[1], {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Margins fell, " },
+      { type: "text", text: "mainly on freight.", citations: [onPage, onWeb] },
+      { type: "text", text: " Pricing was flat." },
+    ],
+  });
+
+  // Stored and loaded, the history sends the same request.
+  await collect(provider({ messages: JSON.parse(JSON.stringify(messages)) }));
+  assert.deepEqual(sent[2], sent[1]);
+});
+
+test("a source is sent only where Anthropic can take it: its own, after text, with a cache breakpoint kept at the end", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok")), options);
+  const messages: AnthropicMessage[] = [
+    user("margins?"),
+    {
+      from: "model",
+      content: [
+        // With nothing before it, there is no text for it to be a citation on.
+        { type: "source", quote: "Nothing before me.", anthropic: onPage },
+        {
+          type: "text",
+          text: "Margins fell, mainly on freight.",
+          anthropic: { cache_control: { type: "ephemeral" } },
+        },
+        // Another provider's: it has no citation of Anthropic's to send.
+        { type: "source", quote: "From elsewhere.", url: "https://example.com" },
+        { type: "source", span: 18, anthropic: onPage },
+        { type: "text", text: " All of this is cited." },
+        // With no span, it speaks for the whole of the text part before it.
+        { type: "source", anthropic: onWeb },
+      ],
+      end: "stop",
+    },
+    user("go on"),
+  ];
+  await collect(provider({ messages }));
+  assert.deepEqual(sent[0].messages[1].content, [
+    { type: "text", text: "Margins fell, " },
+    {
+      type: "text",
+      text: "mainly on freight.",
+      citations: [onPage],
+      cache_control: { type: "ephemeral" },
+    },
+    { type: "text", text: " All of this is cited.", citations: [onWeb] },
+  ]);
+});
+
 // ── Shapes ──────────────────────────────────────────────────────────────────
 
 // A schema Anthropic takes as it is: closed objects, and no bound it does not enforce.
-const verdict = shape({
-  type: "object",
-  properties: {
-    ok: { type: "boolean" },
-    why: { anyOf: [{ type: "string" }, { type: "null" }] },
-    steps: { type: "array", items: { type: "string" }, minItems: 1 },
+const verdict = {
+  schema: {
+    type: "object",
+    properties: {
+      ok: { type: "boolean" },
+      why: { anyOf: [{ type: "string" }, { type: "null" }] },
+      steps: { type: "array", items: { type: "string" }, minItems: 1 },
+    },
+    required: ["ok", "why", "steps"],
+    additionalProperties: false,
   },
-  required: ["ok", "why", "steps"],
-  additionalProperties: false,
-});
+} as const;
 // The schema Anthropic was sent for a shape, and nothing else of the request.
 const sentFor = async (schema: object) => {
   const sent: any[] = [];
@@ -1105,8 +1629,9 @@ test("a shape is asked for as Anthropic's output format, and the answer comes ba
   const claude = anthropic(client(sent, inPieces, says("plain")), options);
   const messages = [user("Is it safe?")];
   const before = structuredClone(verdict.schema);
-  const answer = verdict.parse(
-    await text(claude({ messages, shape: verdict })),
+  const answer = parse(
+    verdict.schema,
+    JSON.parse(await text(claude({ messages, shape: verdict }))),
   );
   assert.deepEqual(answer, { ok: true, why: null, steps: ["look"] });
   assert.deepEqual(sent[0].output_config, {
@@ -1145,28 +1670,30 @@ test("a shape shares output_config with the provider's own options, and is used 
 });
 
 test("a shape's bounds that Anthropic does not enforce are left out and said in the description; the reader still checks them", async () => {
-  const rated = shape({
-    type: "object",
-    properties: {
-      score: { type: "integer", minimum: 1, maximum: 5 },
-      title: {
-        type: "string",
-        description: "A headline.",
-        minLength: 3,
-        maxLength: 60,
+  const rated = {
+    schema: {
+      type: "object",
+      properties: {
+        score: { type: "integer", minimum: 1, maximum: 5 },
+        title: {
+          type: "string",
+          description: "A headline.",
+          minLength: 3,
+          maxLength: 60,
+        },
+        tags: {
+          type: "array",
+          items: { type: "string", maxLength: 12 },
+          minItems: 2,
+          maxItems: 4,
+        },
+        some: { ...strings, minItems: 1 },
+        any: { ...strings, minItems: 0 },
       },
-      tags: {
-        type: "array",
-        items: { type: "string", maxLength: 12 },
-        minItems: 2,
-        maxItems: 4,
-      },
-      some: { ...strings, minItems: 1 },
-      any: { ...strings, minItems: 0 },
+      required: ["score", "title", "tags", "some", "any"],
+      additionalProperties: false,
     },
-    required: ["score", "title", "tags", "some", "any"],
-    additionalProperties: false,
-  });
+  };
   const before = structuredClone(rated.schema);
   assert.deepEqual(await sentFor(rated.schema), {
     type: "object",
@@ -1207,8 +1734,8 @@ test("a shape's bounds that Anthropic does not enforce are left out and said in 
     any: [],
   };
   assert.throws(
-    () => rated.parse(JSON.stringify(outOfBounds)),
-    /^Error: answer\.score must be 5 or less; answer\.title must be 3 or more characters long$/,
+    () => parse(rated.schema, outOfBounds),
+    /^Error: score must be 5 or less; title must be 3 or more characters long$/,
   );
 });
 
@@ -1315,9 +1842,7 @@ test("a shape and tools go in one request: the tools are called first, and the f
     if (calls.length === 0) break;
     messages.push({
       from: "tool",
-      content: await Promise.all(
-        calls.map((call) => runToolCall([weather], call)),
-      ),
+      content: calls.map(answered),
     });
   }
   assert.deepEqual(
@@ -1329,7 +1854,7 @@ test("a shape and tools go in one request: the tools are called first, and the f
   );
   const last = messages.at(-1);
   assert.ok(last?.from === "model" && last.content[0]?.type === "text");
-  assert.deepEqual(verdict.parse(last.content[0].text), {
+  assert.deepEqual(parse(verdict.schema, JSON.parse(last.content[0].text)), {
     ok: false,
     why: "18C",
     steps: ["ask"],
@@ -1379,22 +1904,15 @@ export const illegal = (claude: ReturnType<typeof anthropic>) => {
     ],
     messages: [],
   });
-  // @ts-expect-error and it still holds through the string sugar
-  model(claude)({
-    system: [
-      {
-        type: "text",
-        text: "Rules.",
-        anthropic: { cache_control: { type: "forever" } },
-      },
-    ],
-    messages: [],
-  });
   // @ts-expect-error a system part is text, never a file
   claude({
     system: [{ type: "file", mediaType: "image/png", data: "" }],
     messages: [],
   });
+  // @ts-expect-error a tool's settings have to be ones Anthropic defines
+  claude({ messages: [], tools: [{ ...weather, anthropic: { loud: true } }] });
+  // @ts-expect-error and what the tool is cannot be set among them
+  claude({ messages: [], tools: [{ ...weather, anthropic: { name: "x" } }] });
 };
 
 // ── Reasoning ───────────────────────────────────────────────────────────────
@@ -1516,6 +2034,43 @@ test("reasoning is never sent: with it in a history or taken out, the request is
     "thinking+text",
     "text",
   ]);
+});
+
+test("tool input is never sent: with it in a history or taken out, the request is the same", async () => {
+  const sent: any[] = [];
+  const provider = anthropic(client(sent, says("ok"), says("ok")), options);
+  // A turn whose stream stopped while a call was being written, kept as it was.
+  const messages: PortableMessage[] = [
+    user("the weather?"),
+    {
+      from: "model",
+      content: [
+        { type: "text", text: "Checking." },
+        {
+          type: "tool_input",
+          id: "toolu_1",
+          name: "get_weather",
+          text: '{"city":"Tor',
+        },
+      ],
+    },
+    user("well?"),
+  ];
+  const without = messages.map(
+    (message): PortableMessage =>
+      message.from === "model"
+        ? {
+            ...message,
+            content: message.content.filter(
+              (part) => part.type !== "tool_input",
+            ),
+          }
+        : message,
+  );
+  await collect(provider({ messages }));
+  await collect(provider({ messages: without }));
+  assert.deepEqual(sent[0], sent[1]);
+  assert.deepEqual(sent[0].messages.map(blocks), ["text", "text", "text"]);
 });
 
 test("a turn holding only reasoning is left out, not sent empty", async () => {
