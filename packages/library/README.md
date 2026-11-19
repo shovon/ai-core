@@ -15,13 +15,13 @@ import { anthropic, type AnthropicRequest, type AnthropicSettings } from "@ai-ag
 const claude = anthropic(new Anthropic());
 ```
 
-A client is all a provider is made with. Which model answers, and how, is said by each request, in `native` under the provider's name. Settings are plain data, so the ones every request shares are filled in by a function of your own:
+A client is all a provider is made with. Which model answers, and how, is said by each request, in `settings` under the provider's name. Settings are plain data, so the ones every request shares are filled in by a function of your own:
 
 ```ts
 const opus = { model: "claude-opus-5-5", max_tokens: 64000 } satisfies AnthropicSettings;
 
-const provider = (request: Omit<AnthropicRequest, "native">) =>
-  claude({ ...request, native: { anthropic: opus } });
+const provider = (request: Omit<AnthropicRequest, "settings">) =>
+  claude({ ...request, settings: { anthropic: opus } });
 ```
 
 The examples below call this `provider`. The settings are anything Anthropic's `messages.stream` accepts, except `messages`, `system` and `tools`, which are the request's own. See [Settings](#settings).
@@ -530,13 +530,13 @@ const readFileTool = {
 
 ## Settings
 
-A provider is made with a client and nothing else. Its vendor's settings go on each request, in `native`, under the provider's name.
+A provider is made with a client and nothing else. Its vendor's settings go on each request, in `settings`, under the provider's name.
 
 ```ts
 const answer = await text(
   claude({
     messages: [user("Write a haiku about rain.")],
-    native: { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } },
+    settings: { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } },
   }),
 );
 ```
@@ -545,7 +545,7 @@ const answer = await text(
 - The entry is sent as it is. The provider keeps nothing from one request to the next.
 - A request with no entry for Anthropic is refused before anything is sent: there is no model to send it to.
 - What the request is comes from the request: `messages`, `system` and `tools` cannot be set there. A `shape` on the request is used in place of a `format` in `output_config`.
-- `native` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other.
+- `settings` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other.
 - Which stop sequence ended a turn is on the turn, as `turn.anthropic?.stop_sequence`.
 
 Nothing in the library fills settings in. They are a value, so sharing them and changing them is ordinary TypeScript:
@@ -558,20 +558,20 @@ const opus = {
 } satisfies AnthropicSettings;
 
 // The settings every request shares: a function of your own.
-const provider = (request: Omit<AnthropicRequest, "native">) =>
-  claude({ ...request, native: { anthropic: opus } });
+const provider = (request: Omit<AnthropicRequest, "settings">) =>
+  claude({ ...request, settings: { anthropic: opus } });
 
 // One request that differs: the same value, with what differs changed.
 const title = await text(
   claude({
     messages: [user("Give this conversation a title.")],
-    native: { anthropic: { ...opus, output_config: { effort: "low" }, stop_sequences: ["\n"] } },
+    settings: { anthropic: { ...opus, output_config: { effort: "low" }, stop_sequences: ["\n"] } },
   }),
 );
 
 // A setting that changes often: a function that takes it.
-const withEffort = (effort: "low" | "medium" | "high") => (request: Omit<AnthropicRequest, "native">) =>
-  claude({ ...request, native: { anthropic: { ...opus, output_config: { effort } } } });
+const withEffort = (effort: "low" | "medium" | "high") => (request: Omit<AnthropicRequest, "settings">) =>
+  claude({ ...request, settings: { anthropic: { ...opus, output_config: { effort } } } });
 ```
 
 - `claude` takes only a request that says its settings, so it does not fit where a `Provider` for any request is asked for. With them filled in, as in `provider` and `withEffort("low")`, it does, and a function that wraps any provider takes it.
@@ -609,7 +609,7 @@ For a real one:
   - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
   - Never send a schema whose answers you would have to rewrite on the way back. Throw instead, saying where. Throw too if your API cannot ask for a shape at all.
   - Give the same output for the same schema every time.
-- Take your vendor's settings from the request, in `native` under your provider's name. Be made with nothing but what reaches your API, such as a client.
+- Take your vendor's settings from the request, in `settings` under your provider's name. Be made with nothing but what reaches your API, such as a client.
   - Read the entry under your own name and no other, and never forward the field.
   - Send what is in the entry as it is, and after it what the request itself says, so nothing in the entry can replace the messages, the tools or a `shape`.
   - A request may come from storage, or from code that does not know you. If your API cannot be called without settings, throw for a request that has none.

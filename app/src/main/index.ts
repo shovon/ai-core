@@ -91,7 +91,7 @@ app.on('ready', () => {
 
   const threads = createThreads({
     store: sqliteStore(db),
-    provider: (request) => claude({ ...request, native: { anthropic: opus } }),
+    provider: (request) => claude({ ...request, settings: { anthropic: opus } }),
     // What the model may call. It decides when; the tool's description is what it goes by.
     tools: search ? [webSearch(cloudflareSearch({ fetch, ...search, limit: 5 }))] : [],
     newId: randomUUID,

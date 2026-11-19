@@ -143,7 +143,7 @@ export type AnthropicSettings = Omit<
  * A request as this provider takes one. Its system prompt, given as parts,
  * and its tools may carry hints too.
  *
- * It holds Anthropic's settings, in `native` under Anthropic's name, and they
+ * It holds Anthropic's settings, in `settings` under Anthropic's name, and they
  * are sent as they are. The provider is made with none of its own: settings
  * are plain data, so the ones every request shares are filled in by whatever
  * builds the request.
@@ -152,7 +152,7 @@ export type AnthropicRequest = Request<
   AnthropicMessage,
   TextPart & AnthropicHints,
   AnthropicTool
-> & { native: { anthropic: AnthropicSettings } };
+> & { settings: { anthropic: AnthropicSettings } };
 
 const unsendable = (part: Part) =>
   new Error(`anthropic: cannot send a "${part.type}" part`);
@@ -463,12 +463,12 @@ const fitted = (schema: Record<string, unknown>, at: string): object => {
  * refused here: there is no model to send it to.
  */
 const settingsOf = (
-  native: { readonly [provider: string]: unknown } | undefined,
+  settings: { readonly [provider: string]: unknown } | undefined,
 ): AnthropicSettings => {
-  const own = native?.anthropic;
+  const own = settings?.anthropic;
   if (!isRecord(own))
     throw new Error(
-      "anthropic: a request needs Anthropic's settings, in native.anthropic: a model and max_tokens at least",
+      "anthropic: a request needs Anthropic's settings, in settings.anthropic: a model and max_tokens at least",
     );
   return own as AnthropicSettings;
 };
@@ -558,14 +558,14 @@ const spent = (usage: Anthropic.Usage): Usage => {
 export const anthropic = (
   client: Anthropic,
 ): Takes<AnthropicRequest, AnthropicOut> =>
-  async function* ({ system, messages, tools, shape, native, signal }) {
+  async function* ({ system, messages, tools, shape, settings, signal }) {
     // The settings are addressed to Anthropic by name, so they go as they are.
     // What the request is comes after, so nothing there can replace it.
-    const settings = settingsOf(native);
+    const own = settingsOf(settings);
     const stream = client.messages.stream(
       {
-        ...settings,
-        output_config: outputConfig(settings.output_config, shape),
+        ...own,
+        output_config: outputConfig(own.output_config, shape),
         system: instructions(system),
         // Anthropic has no empty turn; one can be left after foreign parts are dropped.
         messages: fitToolIds(

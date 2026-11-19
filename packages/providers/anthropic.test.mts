@@ -151,8 +151,8 @@ const options = { model: "claude-opus-5-5", max_tokens: 1024 };
 // the settings on each request.
 const claudeWith =
   (client: Anthropic, settings: AnthropicSettings) =>
-  (request: Omit<AnthropicRequest, "native">) =>
-    anthropic(client)({ ...request, native: { anthropic: settings } });
+  (request: Omit<AnthropicRequest, "settings">) =>
+    anthropic(client)({ ...request, settings: { anthropic: settings } });
 const weather: ToolSpec = {
   name: "get_weather",
   description: "Weather.",
@@ -1690,7 +1690,7 @@ test("a request's settings for Anthropic are sent as they are, and nothing else 
   const claude = anthropic(client(sent, says("ok"), says("ok"), says("ok")));
   const request = {
     messages: [user("go")],
-    native: {
+    settings: {
       anthropic: {
         model: "claude-haiku-5-5",
         max_tokens: 256,
@@ -1713,7 +1713,7 @@ test("a request's settings for Anthropic are sent as they are, and nothing else 
   });
   // The provider keeps nothing from one request to the next: each says its own.
   await collect(
-    claude({ messages: request.messages, native: { anthropic: options } }),
+    claude({ messages: request.messages, settings: { anthropic: options } }),
   );
   assert.deepEqual(settingsSent(sent[1]), { ...options, stream: true });
   // Settings are plain data: stored and loaded, the request is sent the same.
@@ -1734,10 +1734,10 @@ test("a request with no settings for Anthropic is refused here, and nothing is s
     { anthropic: "claude-opus-5-5" },
     { anthropic: [options] },
   ];
-  for (const native of without)
+  for (const settings of without)
     await assert.rejects(
-      collect(loose({ messages: [user("hi")], native })),
-      /a request needs Anthropic's settings, in native\.anthropic/,
+      collect(loose({ messages: [user("hi")], settings })),
+      /a request needs Anthropic's settings, in settings\.anthropic/,
     );
   assert.equal(sent.length, 0);
 });
@@ -1758,7 +1758,7 @@ test("settings cannot replace what the request is", async () => {
       system: "Be brief.",
       messages: [user("hi")],
       tools: [weather],
-      native: { anthropic: replacing },
+      settings: { anthropic: replacing },
     }),
   );
   assert.equal(sent[0].system, "Be brief.");
@@ -1770,7 +1770,7 @@ test("settings cannot replace what the request is", async () => {
   assert.equal(sent[0].stream, true);
   // A request with no system prompt and no tools still has none.
   await collect(
-    claude({ messages: [user("hi")], native: { anthropic: replacing } }),
+    claude({ messages: [user("hi")], settings: { anthropic: replacing } }),
   );
   assert.equal(sent[1].messages.length, 1);
   assert.equal("system" in sent[1], false);
@@ -1786,7 +1786,7 @@ test("settings filled in by a function of the program's own make a provider that
     output_config: { effort: "high" },
   } satisfies AnthropicSettings;
   const provider: Provider<PortableMessage, Part> = (request) =>
-    claude({ ...request, native: { anthropic: opus } });
+    claude({ ...request, settings: { anthropic: opus } });
   // A wrapper that knows nothing of Anthropic: it is typed against Provider,
   // changes one field and passes the rest of the request on.
   const brief =
@@ -1805,7 +1805,7 @@ test("settings filled in by a function of the program's own make a provider that
   await collect(
     claude({
       messages: [user("hi")],
-      native: { anthropic: { ...opus, output_config: { effort: "low" } } },
+      settings: { anthropic: { ...opus, output_config: { effort: "low" } } },
     }),
   );
   assert.deepEqual(settingsSent(sent[1]), {
@@ -2067,27 +2067,27 @@ export const illegal = (
   bare({
     messages: [],
     // @ts-expect-error and a model and a limit are among them
-    native: { anthropic: { output_config: { effort: "low" } } },
+    settings: { anthropic: { output_config: { effort: "low" } } },
   });
   bare({
     messages: [],
     // @ts-expect-error a setting has to be one Anthropic defines
-    native: { anthropic: { ...options, output_config: { effort: "lowest" } } },
+    settings: { anthropic: { ...options, output_config: { effort: "lowest" } } },
   });
   bare({
     messages: [],
     // @ts-expect-error the provider always streams, so that is not a setting
-    native: { anthropic: { ...options, stream: false } },
+    settings: { anthropic: { ...options, stream: false } },
   });
   bare({
     messages: [],
     // @ts-expect-error what the request is cannot be set among them
-    native: { anthropic: { ...options, system: "Replaced." } },
+    settings: { anthropic: { ...options, system: "Replaced." } },
   });
   bare({
     messages: [],
-    native: { anthropic: options },
-    // @ts-expect-error a vendor's settings go in `native`, never beside the request's own fields
+    settings: { anthropic: options },
+    // @ts-expect-error a vendor's settings go in `settings`, never beside the request's own fields
     anthropic: options,
   });
   // @ts-expect-error until its settings are filled in, it does not take a portable request
@@ -2101,9 +2101,9 @@ export const illegal = (
   same(bare)({
     messages: [],
     // @ts-expect-error through such a wrapper, a setting still has to be one Anthropic defines
-    native: { anthropic: { ...options, output_config: { effort: "lowest" } } },
+    settings: { anthropic: { ...options, output_config: { effort: "lowest" } } },
   });
-  same(bare)({ messages: [], native: { anthropic: options } });
+  same(bare)({ messages: [], settings: { anthropic: options } });
 };
 
 // ── Reasoning ───────────────────────────────────────────────────────────────

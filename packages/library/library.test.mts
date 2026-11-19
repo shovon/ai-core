@@ -1223,11 +1223,11 @@ test("a request carries settings for a provider under its name: through a wrappe
       inner({ ...request, system: "Be brief." });
   const request: Request<AnyMessage> = {
     messages: [user("hi")],
-    native: { one: { effort: "low" }, two: { seed: 7 } },
+    settings: { one: { effort: "low" }, two: { seed: 7 } },
   };
   await collect(brief(provider)(request));
   assert.equal(provider.seen[0]!.system, "Be brief.");
-  assert.deepEqual(provider.seen[0]!.native, request.native);
+  assert.deepEqual(provider.seen[0]!.settings, request.settings);
   assert.deepEqual(JSON.parse(JSON.stringify(request)), request);
 });
 
@@ -1935,18 +1935,18 @@ export const illegal = async (
 
 // Where a vendor's settings may go on a request, and where they may not.
 export const settings = (
-  // A provider written before `native` existed: its request has no such field.
+  // A provider written before `settings` existed: its request has no such field.
   before: (
-    request: Omit<Request<AnyMessage>, "native">,
+    request: Omit<Request<AnyMessage>, "settings">,
   ) => AsyncIterable<TextPart | End>,
   any: Provider<AnyMessage, Part>,
 ) => {
   // It still fits the port, and is handed the field unseen.
   const fits: Provider<AnyMessage, TextPart> = before;
-  fits({ messages: [], native: { anyone: { any: "thing" } } });
+  fits({ messages: [], settings: { anyone: { any: "thing" } } });
   any({
     messages: [],
-    // @ts-expect-error a vendor's settings go in `native`, never beside the request's own fields
+    // @ts-expect-error a vendor's settings go in `settings`, never beside the request's own fields
     anyone: { any: "thing" },
   });
 };
