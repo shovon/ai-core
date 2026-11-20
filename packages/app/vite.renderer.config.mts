@@ -13,5 +13,5 @@ export default defineConfig({
   // A workspace package is source, not a dependency: pre-bundled, it is
   // cached under a hash of the lockfile, so an edit to it never reaches the
   // window.
-  optimizeDeps: { exclude: ['@ai-agent-library/library', '@ai-agent-library/providers', '@ai-agent-library/tree'] },
+  optimizeDeps: { exclude: ['@ai-idioms/core', '@ai-idioms/anthropic-provider', '@ai-agent-library/tree'] },
 });

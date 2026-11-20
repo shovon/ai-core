@@ -3,7 +3,7 @@
  * surface on `window.agent.threads`. Bundled into the page too, so it stays
  * free of `node:` imports. Everything here crosses the bridge as plain JSON.
  */
-import type { End, NativePart, PortableMessage, ReasoningPart, SourcePart, TextPart, ToolCall, ToolInputPart } from '@ai-agent-library/library';
+import type { End, NativePart, PortableMessage, ReasoningPart, SourcePart, TextPart, ToolCall, ToolInputPart } from '@ai-idioms/core';
 
 export const THREAD_CHANNELS = {
   list: 'threads:list',
