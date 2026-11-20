@@ -2,7 +2,12 @@
   "name": "@ai-idioms/anthropic-provider",
   "version": "0.1.0",
   "description": "Anthropic's API as a provider for @ai-idioms/core: the vendor's API behind the library's one port. The SDK is yours to install.",
-  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shovon/ai-core.git",
+    "directory": "packages/anthropic-provider"
+  },
   "type": "module",
   "types": "./dist/anthropic.d.ts",
   "//": "Inside this workspace the package is run as source, through the `@ai-idioms/source` condition, so nothing here needs a build. What is published is `dist/`, built by `prepack`.",
@@ -16,6 +21,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "node --eval \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "prepack": "npm run build",
@@ -23,7 +31,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
-    "@ai-idioms/core": "*"
+    "@ai-idioms/core": "^0.1.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "^1.8.0"
