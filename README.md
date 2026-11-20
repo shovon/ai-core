@@ -71,6 +71,8 @@ npm run lint
 
 Inside the workspace the packages are read as source, so none of those needs a build. `npm run build` makes what is published: each package's `dist/`.
 
+A pull request that changes a published package says so with a changeset: run `npx changeset` and commit the file it writes. [.changeset/README.md](.changeset/README.md) says how big a change to call it.
+
 `npm start` opens the app. It needs Anthropic credentials, such as `ANTHROPIC_API_KEY` in the environment.
 
 ## License
