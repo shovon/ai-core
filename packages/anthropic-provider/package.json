@@ -10,10 +10,10 @@
   },
   "type": "module",
   "types": "./dist/anthropic.d.ts",
-  "//": "Inside this workspace the package is run as source, through the `@ai-idioms/source` condition, so nothing here needs a build. What is published is `dist/`, built by `prepack`.",
+  "//": "Inside this workspace the package is run as source, through the `@ai-patterns/source` condition, so nothing here needs a build. What is published is `dist/`, built by `prepack`.",
   "exports": {
     ".": {
-      "@ai-idioms/source": "./anthropic.ts",
+      "@ai-patterns/source": "./anthropic.ts",
       "types": "./dist/anthropic.d.ts",
       "default": "./dist/anthropic.js"
     }
@@ -27,7 +27,7 @@
   "scripts": {
     "build": "node --eval \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "prepack": "npm run build",
-    "test": "node -C @ai-idioms/source --test \"*.test.mts\"",
+    "test": "node -C @ai-patterns/source --test \"*.test.mts\"",
     "typecheck": "tsc"
   },
   "dependencies": {

@@ -8,7 +8,7 @@
   "scripts": {
     "start": "electron-forge start",
     "package": "electron-forge package",
-    "test": "node -C @ai-idioms/source --test \"src/**/*.test.ts\"",
+    "test": "node -C @ai-patterns/source --test \"src/**/*.test.ts\"",
     "lint": "eslint .",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",

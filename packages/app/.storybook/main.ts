@@ -15,7 +15,7 @@ const config: StorybookConfig = {
     plugins: [...(config.plugins ?? []), tailwindcss()],
     resolve: {
       ...config.resolve,
-      conditions: [...defaultClientConditions, '@ai-idioms/source'],
+      conditions: [...defaultClientConditions, '@ai-patterns/source'],
     },
   }),
 };

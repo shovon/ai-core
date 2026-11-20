@@ -5,7 +5,7 @@
   "compilerOptions": {
     // Core is read as source, not as its build: see `exports` in its
     // package.json.
-    "customConditions": ["@ai-idioms/source"],
+    "customConditions": ["@ai-patterns/source"],
     "target": "esnext",
     "module": "nodenext",
     "types": ["node"],

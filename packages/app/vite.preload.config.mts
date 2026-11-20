@@ -6,7 +6,7 @@ export default defineConfig({
   // edit to one needs no build to reach the app: see `exports` in their
   // package.json.
   // Naming any condition replaces Vite's own, so those are named too.
-  resolve: { conditions: [...defaultClientConditions, '@ai-idioms/source'] },
+  resolve: { conditions: [...defaultClientConditions, '@ai-patterns/source'] },
   build: {
     rolldownOptions: {
       output: {
