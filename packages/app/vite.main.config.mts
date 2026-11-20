@@ -7,7 +7,7 @@ export default defineConfig({
   // edit to one needs no build to reach the app: see `exports` in their
   // package.json.
   // Forge's own conditions for the main process are kept; this adds one.
-  resolve: { conditions: ['@ai-idioms/source'] },
+  resolve: { conditions: ['@ai-patterns/source'] },
   build: {
     lib: {
       entry: 'src/main/index.ts',

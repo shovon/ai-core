@@ -4,7 +4,7 @@
   "compilerOptions": {
     // What picks the library's source over its build: see `exports` in its
     // packages' package.json.
-    "customConditions": ["@ai-idioms/source"],
+    "customConditions": ["@ai-patterns/source"],
     "target": "esnext",
     "module": "esnext",
     "moduleResolution": "bundler",

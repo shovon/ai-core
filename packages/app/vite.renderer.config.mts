@@ -16,7 +16,7 @@ export default defineConfig({
   // Naming any condition replaces Vite's own, so those are named too.
   resolve: {
     preserveSymlinks: false,
-    conditions: [...defaultClientConditions, '@ai-idioms/source'],
+    conditions: [...defaultClientConditions, '@ai-patterns/source'],
   },
   // A workspace package is source, not a dependency: pre-bundled, it is
   // cached under a hash of the lockfile, so an edit to it never reaches the
