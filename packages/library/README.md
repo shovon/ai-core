@@ -465,7 +465,7 @@ if (turn?.from === "model") {
 - All of it comes on the `end` chunk that closes the turn, and `append` keeps whatever an `end` carries on the turn. So it is in a stored history too, as plain JSON.
 - None of it is ever sent. A provider reads only a turn's content.
 - Typed as `AnthropicMessage`, a turn's `anthropic` field is typed. In a history typed more widely it is there all the same, for you to narrow.
-- Response headers are not kept on a turn. To read them, make the call yourself: see the [Anthropic provider's README](../providers/README.md#make-the-call-yourself).
+- Response headers are not kept on a turn. The [Anthropic provider's README](../providers/README.md#keep-a-responses-headers) shows how to read them, and how to keep them.
 
 ## Cancelling
 
