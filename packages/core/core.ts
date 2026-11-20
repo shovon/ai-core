@@ -3,7 +3,19 @@
 // ── Parts: the least a workflow and a UI have to agree on ───────────────────
 
 export type Part = { readonly type: string }; // every part is a subtype of this
-export type TextPart = { type: "text"; text: string };
+/**
+ * What only one provider understands, each under that provider's name. A value
+ * of this library holds it in one of two fields, and nowhere else:
+ * - `settings` is addressed to a provider: that vendor's own settings for a
+ *   part, a tool or a request.
+ * - `details` is what a provider said: whatever else it knows of a response
+ *   or of a source.
+ *
+ * A provider reads the entry under its own name and ignores every other. So
+ * no type here takes a vendor's field beside its own fields.
+ */
+export type ByProvider = { readonly [provider: string]: unknown };
+export type TextPart = { type: "text"; text: string; settings?: ByProvider };
 /**
  * What the model says of its own working, as it works. It is for showing,
  * never for sending: what a provider needs back to continue a turn travels as
@@ -22,13 +34,14 @@ export type ReasoningPart = { type: "reasoning"; text: string };
  * provider whose model makes one emits it whole.
  */
 export type FilePart =
-  | { type: "file"; mediaType: string; data: string }
-  | { type: "file"; mediaType: string; url: string };
+  | { type: "file"; mediaType: string; data: string; settings?: ByProvider }
+  | { type: "file"; mediaType: string; url: string; settings?: ByProvider };
 export type ToolCall = {
   type: "tool_call";
   id: string;
   name: string;
   input: unknown;
+  settings?: ByProvider;
 };
 /**
  * The input of a tool call as the model writes it: its JSON text, in pieces.
@@ -58,9 +71,9 @@ export type ToolInputPart = {
  * the span is what keeps a source to its own passage.
  *
  * `quote` is the passage relied on, `title` what it is from, and `url` where
- * that is. Whatever else a provider knows of a source is in a field under the
- * provider's name. A provider sends its own sources back with the text, if its
- * API takes them, and leaves out everyone else's.
+ * that is. Whatever else a provider knows of a source is in `details`, under
+ * the provider's name. A provider sends its own sources back with the text, if
+ * its API takes them, and leaves out everyone else's.
  */
 export type SourcePart = {
   type: "source";
@@ -68,12 +81,14 @@ export type SourcePart = {
   quote?: string;
   title?: string;
   url?: string;
+  details?: ByProvider;
 };
 export type ToolResult = {
   type: "tool_result";
   id: string;
   content: readonly (TextPart | FilePart)[];
   error?: boolean;
+  settings?: ByProvider;
 };
 /**
  * Something only one provider understands, such as its reasoning state. It
@@ -116,9 +131,9 @@ export type Usage = {
  * - `model` is the model that answered, as the provider names it, which may
  *   be more exact than the one asked for.
  *
- * It may also carry a field under its provider's name, holding whatever else
- * that provider says of the response. `append` keeps every one of these on
- * the turn, so a stored history holds them too. None of it is ever sent.
+ * It may also carry `details`: under its provider's name, whatever else that
+ * provider says of the response. `append` keeps all of this on the turn, so a
+ * stored history holds it too. None of it is ever sent.
  */
 export type End = {
   type: "end";
@@ -126,6 +141,7 @@ export type End = {
   usage?: Usage;
   id?: string;
   model?: string;
+  details?: ByProvider;
 };
 
 // ── History: who a message is from decides what it may contain ──────────────
@@ -148,8 +164,9 @@ export type UserMessage<P extends Part> = {
  * `id` and `model` are the provider's name for the response and the model that
  * gave it, when the provider said.
  *
- * A finished turn holds whatever else its End carried, such as a field under
- * the provider's name. A provider reads only `content` when it sends a turn.
+ * A finished turn holds whatever else its End carried: its `details`, which
+ * is what the provider said of the response, under the provider's name. A
+ * provider reads only `content` when it sends a turn.
  */
 export type ModelMessage<P extends Part> = {
   from: "model";
@@ -158,6 +175,7 @@ export type ModelMessage<P extends Part> = {
   usage?: Usage;
   id?: string;
   model?: string;
+  details?: ByProvider;
 };
 export type ToolMessage = { from: "tool"; content: readonly ToolResult[] };
 
@@ -198,11 +216,16 @@ export type Reply<Out extends Part> = readonly (
 )[];
 
 /**
- * What the model is told of a tool. It may carry an extra field under one
- * provider's name, holding that provider's own settings for the tool. Every
- * other provider ignores the field and is told the same tool.
+ * What the model is told of a tool. It may carry `settings`: under one
+ * provider's name, that provider's own settings for the tool. Every other
+ * provider ignores the entry and is told the same tool.
  */
-export type ToolSpec = { name: string; description: string; schema: object };
+export type ToolSpec = {
+  name: string;
+  description: string;
+  schema: object;
+  settings?: ByProvider;
+};
 /** What an answer must be: JSON that fits this schema. `parse` checks one, once it is read as JSON. */
 export type ShapeSpec = { schema: object };
 export type Request<
@@ -232,7 +255,7 @@ export type Request<
    * entry under its own name and ignores every other. Nothing else on a request
    * is a vendor's: this is the one field that holds what the library does not name.
    */
-  settings?: { readonly [provider: string]: unknown };
+  settings?: ByProvider;
   /** Cancels the call. The stream then throws. Tools are yours to run, so give them the same signal to cancel them too. */
   signal?: AbortSignal;
 };
@@ -262,15 +285,24 @@ export type Request<
 // everyone else's, so one history can pass between providers without losing
 // what each of them needs.
 //
-// A shared part may carry extra fields meant for one provider, such as a
-// caching hint. A provider builds what it sends from the fields it knows and
-// ignores the rest; it never forwards a part whole.
+// What only one provider understands sits in one of two fields, under that
+// provider's name, and nowhere else: `settings` for what is addressed to a
+// provider, `details` for what a provider said. No value here takes a vendor's
+// field beside its own, so a field the library adds later cannot meet one.
 //
-// A tool may carry a field under one provider's name: that provider's own
-// settings for the tool. What sits under a provider's name is addressed to it
-// alone, so it may send that on as it is, and every setting its API has for a
-// tool stays in reach. What the tool is, its name, description and schema,
-// always comes from the tool itself.
+// A shared part may carry settings meant for one provider, such as a caching
+// hint, in its `settings`. A provider builds what it sends from the fields it
+// knows and ignores the rest; it never forwards a part whole.
+//
+// A tool may carry them too: in its `settings`, under one provider's name,
+// that provider's own settings for the tool. What sits under a provider's
+// name is addressed to it alone, so it may send that on as it is, and every
+// setting its API has for a tool stays in reach. What the tool is, its name,
+// description and schema, always comes from the tool itself.
+//
+// What a provider says of a response, beyond what the library names, is in
+// the `details` of the End that closes the turn. What it knows of a source is
+// in the source's `details`.
 //
 // A request holds a provider's settings in `settings`, under that provider's
 // name: which model answers, and whatever else its API takes. A provider is

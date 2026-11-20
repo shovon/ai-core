@@ -573,12 +573,13 @@ test("another provider's tool-call ids are made acceptable, and still pair with 
 test("hints: a cache breakpoint on a shared part reaches Anthropic, and only that", async () => {
   const sent: any[] = [];
   const here = { cache_control: { type: "ephemeral", ttl: "1h" } } as const;
+  const hinted = { anthropic: here };
   const messages: AnthropicMessage[] = [
     {
       from: "user",
       content: [
-        { type: "text", text: "A long reference document.", anthropic: here },
-        { ...file("image/png", new Uint8Array([1])), anthropic: here },
+        { type: "text", text: "A long reference document.", settings: hinted },
+        { ...file("image/png", new Uint8Array([1])), settings: hinted },
         { type: "text", text: "No hint on this one." },
       ],
     },
@@ -586,13 +587,13 @@ test("hints: a cache breakpoint on a shared part reaches Anthropic, and only tha
       from: "model",
       end: "stop",
       content: [
-        { type: "text", text: "Looking.", anthropic: here },
+        { type: "text", text: "Looking.", settings: hinted },
         {
           type: "tool_call",
           id: "toolu_1",
           name: "get_weather",
           input: {},
-          anthropic: here,
+          settings: hinted,
         },
       ],
     },
@@ -603,7 +604,7 @@ test("hints: a cache breakpoint on a shared part reaches Anthropic, and only tha
           type: "tool_result",
           id: "toolu_1",
           content: [{ type: "text", text: "18C" }],
-          anthropic: here,
+          settings: hinted,
         },
       ],
     },
@@ -645,9 +646,11 @@ test("hints: unknown keys in the field, and hints inside a tool result, are not 
           {
             type: "text",
             text: "hi",
-            anthropic: {
-              cache_control: { type: "ephemeral" },
-              secret: "s3cr3t",
+            settings: {
+              anthropic: {
+                cache_control: { type: "ephemeral" },
+                secret: "s3cr3t",
+              },
             },
           },
         ],
@@ -669,7 +672,9 @@ test("hints: unknown keys in the field, and hints inside a tool result, are not 
               {
                 type: "text",
                 text: "18C",
-                anthropic: { cache_control: { type: "ephemeral" } },
+                settings: {
+                  anthropic: { cache_control: { type: "ephemeral" } },
+                },
               },
             ],
           },
@@ -698,7 +703,7 @@ test("hints: a hinted history is still a portable one, and the plain helpers car
   const document = {
     type: "text",
     text: "A long reference document.",
-    anthropic: { cache_control: { type: "ephemeral" } },
+    settings: { anthropic: { cache_control: { type: "ephemeral" } } },
   } as const;
   const messages: PortableMessage[] = [user(document, "What does it say?")];
   // The other provider is typed for a portable history and is handed the hinted one unchanged.
@@ -719,7 +724,7 @@ test("the system prompt can be text parts, each with its own cache breakpoint", 
   const rules = {
     type: "text",
     text: "Long, fixed rules.",
-    anthropic: { cache_control: { type: "ephemeral" } },
+    settings: { anthropic: { cache_control: { type: "ephemeral" } } },
   } as const;
   const today = { type: "text", text: "Today is Monday." } as const;
   const messages = [user("hi")];
@@ -741,7 +746,7 @@ test("the system prompt can be text parts, each with its own cache breakpoint", 
   // Written inline, hints are checked and sent as well.
   await collect(
     provider({
-      system: [{ type: "text", text: "Rules.", anthropic: rules.anthropic }],
+      system: [{ type: "text", text: "Rules.", settings: rules.settings }],
       messages,
     }),
   );
@@ -758,7 +763,7 @@ test("system parts concatenate exactly: a list means the same as its joined stri
   );
   const here = { cache_control: { type: "ephemeral" } } as const;
   const part = (text: string, anthropic?: typeof here) =>
-    ({ type: "text", text, ...(anthropic && { anthropic }) }) as const;
+    ({ type: "text", text, ...(anthropic && { settings: { anthropic } }) }) as const;
   const messages = [user("hi")];
 
   // With no hints, the list and the string produce the same request.
@@ -847,10 +852,12 @@ test("a tool's settings for Anthropic are sent as they are, beside what the tool
       required: ["city"],
       additionalProperties: false,
     },
-    anthropic: {
-      strict: true,
-      eager_input_streaming: true,
-      cache_control: { type: "ephemeral" },
+    settings: {
+      anthropic: {
+        strict: true,
+        eager_input_streaming: true,
+        cache_control: { type: "ephemeral" },
+      },
     },
   } as const satisfies AnthropicTool;
   await collect(provider({ messages: [user("hi")], tools: [strict, weather] }));
@@ -881,13 +888,15 @@ test("a tool's settings cannot replace what the tool is, and a field for another
   // Held in a variable, a tool may carry more than the type knows, as one read from storage might.
   const tool = {
     ...weather,
-    anthropic: {
-      input_examples: [{ city: "Toronto" }],
-      name: "replaced",
-      description: "Replaced.",
-      input_schema: { type: "string" },
+    settings: {
+      anthropic: {
+        input_examples: [{ city: "Toronto" }],
+        name: "replaced",
+        description: "Replaced.",
+        input_schema: { type: "string" },
+      },
+      other: { parallel: false },
     },
-    other: { parallel: false },
   };
   // Any provider's request type takes it: the field rides along unseen.
   const portable: Provider<PortableMessage, Part> = provider;
@@ -954,7 +963,7 @@ test("a turn ends with Anthropic's account of the response: its id and model, an
     usage: { input: 1, output: 5, cacheRead: 0, cacheWrite: 0 },
     id: "msg_1",
     model: "m",
-    anthropic: account,
+    details: { anthropic: account },
   });
 
   // Folded, it is on the turn, and typed there: which stop sequence it was is read by name.
@@ -962,9 +971,9 @@ test("a turn ends with Anthropic's account of the response: its id and model, an
   const turn = messages[1];
   assert.ok(turn?.from === "model");
   assert.deepEqual([turn.id, turn.model], ["msg_1", "m"]);
-  assert.deepEqual(turn.anthropic, account);
-  const matched: string | null | undefined = turn.anthropic?.stop_sequence;
-  const request: string | null | undefined = turn.anthropic?.request_id;
+  assert.deepEqual(turn.details?.anthropic, account);
+  const matched: string | null | undefined = turn.details?.anthropic?.stop_sequence;
+  const request: string | null | undefined = turn.details?.anthropic?.request_id;
   assert.deepEqual([matched, request], [" three", "req_1"]);
   // It is plain data: stored and loaded, the turn is equal.
   assert.deepEqual(JSON.parse(JSON.stringify(turn)), turn);
@@ -984,11 +993,11 @@ test("a response that does not name its request still ends with the rest of the 
   assert.ok(turn?.from === "model");
   const kept: AnthropicMessage = turn;
   assert.ok(kept.from === "model");
-  assert.equal(kept.anthropic?.request_id, null);
-  assert.equal(kept.anthropic?.stop_reason, "end_turn");
+  assert.equal(kept.details?.anthropic?.request_id, null);
+  assert.equal(kept.details?.anthropic?.stop_reason, "end_turn");
   // What the SDK left undefined is left out, not kept as a hole.
   assert.ok(
-    Object.values(kept.anthropic ?? {}).every((value) => value !== undefined),
+    Object.values(kept.details?.anthropic ?? {}).every((value) => value !== undefined),
   );
 });
 
@@ -1055,7 +1064,7 @@ test("usage: thinking tokens are told as reasoning, within the output, when Anth
     reasoning: 40,
   });
   // Anthropic's own count is there beside it, with whatever else it reports.
-  assert.deepEqual(turn.anthropic?.usage.output_tokens_details, {
+  assert.deepEqual(turn.details?.anthropic?.usage.output_tokens_details, {
     thinking_tokens: 40,
   });
 
@@ -1190,7 +1199,7 @@ test("a history is plain JSON: stored and loaded, it is equal and sends the same
     user(
       {
         ...file("image/png", new Uint8Array([1, 2, 3])),
-        anthropic: { cache_control: { type: "ephemeral" } },
+        settings: { anthropic: { cache_control: { type: "ephemeral" } } },
       },
       file("application/pdf", new URL("https://example.com/a.pdf")),
       "weather?",
@@ -1386,8 +1395,14 @@ test("a file's settings for Anthropic go on a document as they are; an image tak
   } as const;
   const messages: AnthropicMessage[] = [
     user(
-      { ...file("application/pdf", new Uint8Array([1, 2, 3])), anthropic: settings },
-      { ...file("image/png", new Uint8Array([1, 2, 3])), anthropic: settings },
+      {
+        ...file("application/pdf", new Uint8Array([1, 2, 3])),
+        settings: { anthropic: settings },
+      },
+      {
+        ...file("image/png", new Uint8Array([1, 2, 3])),
+        settings: { anthropic: settings },
+      },
       "What drove the margin change?",
     ),
   ];
@@ -1412,7 +1427,7 @@ test("a text file goes to Anthropic as a document holding the text itself", asyn
   const words = "Freight rose 31%.\nCafé margins held. 🚚";
   const notes = {
     ...file("text/plain", new TextEncoder().encode(words)),
-    anthropic: { citations: { enabled: true }, title: "Notes" },
+    settings: { anthropic: { citations: { enabled: true }, title: "Notes" } },
   };
   await collect(provider({ messages: [user(notes, "Summarise.")] }));
   assert.deepEqual(sent[0].messages[0].content[0], {
@@ -1503,7 +1518,7 @@ const pageSource = {
   span: 18,
   quote: "Freight expense rose 31%.",
   title: "Q3 report",
-  anthropic: onPage,
+  details: { anthropic: onPage },
 };
 const webSource = {
   type: "source",
@@ -1511,7 +1526,7 @@ const webSource = {
   quote: "Container rates doubled.",
   title: "Shipping news",
   url: "https://example.com/rates",
-  anthropic: onWeb,
+  details: { anthropic: onWeb },
 };
 
 test("what a passage rests on is told as sources, directly after its text, each with how much text is its own", async () => {
@@ -1543,8 +1558,8 @@ test("what a passage rests on is told as sources, directly after its text, each 
   assert.ok(said && isText(said) && first && isSource(first));
   assert.equal(said.text.slice(-(first.span ?? 0)), "mainly on freight.");
   // Anthropic's own citation keeps its type: narrowing reaches the pages.
-  assert.ok(first.anthropic.type === "page_location");
-  assert.equal(first.anthropic.start_page_number, 4);
+  assert.ok(first.details.anthropic.type === "page_location");
+  assert.equal(first.details.anthropic.start_page_number, 4);
   assert.equal(
     await text(claudeWith(client([], citing), options)({ messages: [] })),
     "Margins fell, mainly on freight. Pricing was flat.",
@@ -1581,18 +1596,22 @@ test("a source is sent only where Anthropic can take it: its own, after text, wi
       from: "model",
       content: [
         // With nothing before it, there is no text for it to be a citation on.
-        { type: "source", quote: "Nothing before me.", anthropic: onPage },
+        {
+          type: "source",
+          quote: "Nothing before me.",
+          details: { anthropic: onPage },
+        },
         {
           type: "text",
           text: "Margins fell, mainly on freight.",
-          anthropic: { cache_control: { type: "ephemeral" } },
+          settings: { anthropic: { cache_control: { type: "ephemeral" } } },
         },
         // Another provider's: it has no citation of Anthropic's to send.
         { type: "source", quote: "From elsewhere.", url: "https://example.com" },
-        { type: "source", span: 18, anthropic: onPage },
+        { type: "source", span: 18, details: { anthropic: onPage } },
         { type: "text", text: " All of this is cited." },
         // With no span, it speaks for the whole of the text part before it.
-        { type: "source", anthropic: onWeb },
+        { type: "source", details: { anthropic: onWeb } },
       ],
       end: "stop",
     },
@@ -2361,7 +2380,7 @@ export const illegal = (
             type: "text",
             text: "hi",
             // @ts-expect-error a hint has to be one Anthropic defines
-            anthropic: { cache_control: { type: "forever" } },
+            settings: { anthropic: { cache_control: { type: "forever" } } },
           },
         ],
       },
@@ -2371,8 +2390,17 @@ export const illegal = (
     messages: [
       {
         from: "user",
-        // @ts-expect-error and nothing else may ride in the field
-        content: [{ type: "text", text: "hi", anthropic: { temperature: 0 } }],
+        // @ts-expect-error and nothing else may ride in the entry
+        content: [{ type: "text", text: "hi", settings: { anthropic: { temperature: 0 } } }],
+      },
+    ],
+  });
+  claude({
+    messages: [
+      {
+        from: "user",
+        // @ts-expect-error a hint goes in the part's `settings`, never beside the part's own fields
+        content: [{ type: "text", text: "hi", anthropic: { cache_control: { type: "ephemeral" } } }],
       },
     ],
   });
@@ -2382,7 +2410,7 @@ export const illegal = (
         type: "text",
         text: "Rules.",
         // @ts-expect-error the same holds for a hint on a system part
-        anthropic: { cache_control: { type: "forever" } },
+        settings: { anthropic: { cache_control: { type: "forever" } } },
       },
     ],
     messages: [],
@@ -2393,9 +2421,9 @@ export const illegal = (
     messages: [],
   });
   // @ts-expect-error a tool's settings have to be ones Anthropic defines
-  claude({ messages: [], tools: [{ ...weather, anthropic: { loud: true } }] });
+  claude({ messages: [], tools: [{ ...weather, settings: { anthropic: { loud: true } } }] });
   // @ts-expect-error and what the tool is cannot be set among them
-  claude({ messages: [], tools: [{ ...weather, anthropic: { name: "x" } }] });
+  claude({ messages: [], tools: [{ ...weather, settings: { anthropic: { name: "x" } } }] });
   // @ts-expect-error a request to Anthropic says its settings: nothing else names a model
   bare({ messages: [] });
   bare({
@@ -2760,15 +2788,18 @@ const keepingHeaders = (
       yield isEnd(chunk)
         ? {
             ...chunk,
-            anthropic: {
-              ...chunk.anthropic,
-              headers: rateLimits(stream.response?.headers),
+            details: {
+              ...chunk.details,
+              anthropic: {
+                ...chunk.details?.anthropic,
+                headers: rateLimits(stream.response?.headers),
+              },
             },
           }
         : chunk;
   };
 type KeepingHeaders = AnthropicMessage & {
-  anthropic?: { headers?: Record<string, string> };
+  details?: { anthropic?: { headers?: Record<string, string> } };
 };
 
 test("a provider of the caller's own, made from the two halves, keeps a response's headers on the turn", async () => {
@@ -2804,11 +2835,11 @@ test("a provider of the caller's own, made from the two halves, keeps a response
   const turn = messages[1];
   assert.ok(turn?.from === "model");
   // Only the headers the caller chose, beside the rest of Anthropic's account.
-  assert.deepEqual(turn.anthropic?.headers, {
+  assert.deepEqual(turn.details?.anthropic?.headers, {
     "anthropic-ratelimit-requests-remaining": "41",
     "anthropic-ratelimit-tokens-remaining": "9000",
   });
-  assert.equal(turn.anthropic?.request_id, "req_1");
+  assert.equal(turn.details?.anthropic?.request_id, "req_1");
   assert.equal(turn.id, "msg_1");
   // The turn is still plain JSON, and nothing kept on it is sent.
   assert.deepEqual(JSON.parse(JSON.stringify(messages)), messages);
@@ -3142,7 +3173,7 @@ test("the reply to a compaction request is the summary alone: its turn ends as u
   ]);
   // It is no answer. Which reason Anthropic gave is on the turn.
   assert.equal(turn.end, "unknown");
-  assert.equal(turn.anthropic?.stop_reason, "compaction");
+  assert.equal(turn.details?.anthropic?.stop_reason, "compaction");
 
   // The summary takes the place of the messages it stands for.
   const messages: AnthropicMessage[] = [
@@ -3208,6 +3239,44 @@ test("what context management cleared, and each attempt a fallback made, are on 
   const [turn] = reply;
   assert.deepEqual(sent[0].context_management, managing.context_management);
   assert.ok(turn?.from === "model");
-  assert.deepEqual(turn.anthropic?.context_management, cleared);
-  assert.deepEqual(turn.anthropic?.usage.iterations, iterations);
+  assert.deepEqual(turn.details?.anthropic?.context_management, cleared);
+  assert.deepEqual(turn.details?.anthropic?.usage.iterations, iterations);
+});
+
+// A vendor's own sits in `settings` or in `details`, and nowhere else. So a
+// field under Anthropic's name beside a part's own fields, as a history
+// written before that rule holds it, is one the provider does not know.
+test("a vendor's field beside a part's own fields is not read: not a hint, not a citation, not a tool's settings", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(client(sent, says("ok")));
+  const stored: any[] = [
+    {
+      from: "user",
+      content: [
+        { type: "text", text: "hi", anthropic: { cache_control: { type: "ephemeral" } } },
+      ],
+    },
+    {
+      from: "model",
+      end: "stop",
+      anthropic: { stop_reason: "end_turn" },
+      content: [
+        { type: "text", text: "Freight rose." },
+        { type: "source", quote: "Freight rose 31%.", anthropic: onPage },
+      ],
+    },
+    { from: "user", content: [{ type: "text", text: "and?" }] },
+  ];
+  const tool: any = { ...weather, anthropic: { strict: true } };
+  await collect(
+    claude({ messages: stored, tools: [tool], settings: { anthropic: options } }),
+  );
+  assert.deepEqual(sent[0].messages, [
+    { role: "user", content: [{ type: "text", text: "hi" }] },
+    { role: "assistant", content: [{ type: "text", text: "Freight rose." }] },
+    { role: "user", content: [{ type: "text", text: "and?" }] },
+  ]);
+  assert.deepEqual(sent[0].tools, [
+    { name: "get_weather", description: "Weather.", input_schema: { type: "object" } },
+  ]);
 });

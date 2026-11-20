@@ -221,7 +221,7 @@ test("a file given by link can be fetched by the caller and given as its bytes, 
   };
   const linked = {
     ...file("application/pdf", new URL("http://localhost:8080/report.pdf")),
-    acme: { title: "Q3 report" },
+    settings: { acme: { title: "Q3 report" } },
   };
   const already = file("image/png", new Uint8Array([9]));
   const message = await inlined(user(linked, already, "Summarise."), get);
@@ -233,7 +233,7 @@ test("a file given by link can be fetched by the caller and given as its bytes, 
         type: "file",
         mediaType: "application/pdf",
         data: "AQID",
-        acme: { title: "Q3 report" },
+        settings: { acme: { title: "Q3 report" } },
       },
       already,
       say("Summarise."),
@@ -335,23 +335,26 @@ test("append() is pure and builds turns: parts join, End finishes, results group
 });
 
 test("append() keeps all an End carries on the turn: the reason as `end`, and the rest as it is", () => {
-  // What a provider says of its response: the shared id and model, and its own account under its name.
-  // A provider types its End as the shared one and more.
-  type AcmeEnd = End & { acme: { request: string; stopped_on: string } };
+  // What a provider says of its response: the shared id and model, and its own
+  // account in `details`, under its name. A provider types its End as the
+  // shared one, with what its own entry holds.
+  type AcmeEnd = End & {
+    details: { acme: { request: string; stopped_on: string } };
+  };
   const told: AcmeEnd = {
     type: "end",
     reason: "stop",
     usage: { input: 3, output: 5 },
     id: "resp_1",
     model: "model-2026-01-01",
-    acme: { request: "req_9", stopped_on: "END" },
+    details: { acme: { request: "req_9", stopped_on: "END" } },
   };
   const empty: Reply<TextPart> = [];
   const said = {
     usage: { input: 3, output: 5 },
     id: "resp_1",
     model: "model-2026-01-01",
-    acme: { request: "req_9", stopped_on: "END" },
+    details: { acme: { request: "req_9", stopped_on: "END" } },
   };
   const reply = [say("Blue."), told].reduce(append<TextPart>, empty);
   assert.deepEqual(reply, [
@@ -1931,6 +1934,52 @@ export const illegal = async (
   });
   // @ts-expect-error a provider that cannot take tool messages cannot be sent tool results
   textOnly({ messages: [{ from: "tool", content: [answer] }] });
+};
+
+// Where a vendor's own may go on a part, a tool and what closes a turn, and
+// where it may not: in `settings` or in `details`, under the vendor's name,
+// never beside the fields the library names.
+export const vendorsOwn = () => {
+  const hinted: TextPart = {
+    type: "text",
+    text: "hi",
+    settings: { anyone: { any: "thing" } },
+  };
+  const tool: ToolSpec = {
+    name: "t",
+    description: "A tool.",
+    schema: { type: "object" },
+    settings: { anyone: { any: "thing" } },
+  };
+  const cited: SourcePart = {
+    type: "source",
+    details: { anyone: { any: "thing" } },
+  };
+  const ended: End = {
+    type: "end",
+    reason: "stop",
+    details: { anyone: { any: "thing" } },
+  };
+  const bare: TextPart = {
+    type: "text",
+    text: "hi",
+    // @ts-expect-error a vendor's settings go in `settings`, never beside the part's own fields
+    anyone: { any: "thing" },
+  };
+  const loose: End = {
+    type: "end",
+    reason: "stop",
+    // @ts-expect-error what a vendor said goes in `details`, never beside the End's own fields
+    anyone: { any: "thing" },
+  };
+  const named: ToolSpec = {
+    name: "t",
+    description: "A tool.",
+    schema: { type: "object" },
+    // @ts-expect-error a vendor's settings for a tool go in `settings`, never beside the tool's own fields
+    anyone: { any: "thing" },
+  };
+  return [hinted, tool, cited, ended, bare, loose, named];
 };
 
 // Where a vendor's settings may go on a request, and where they may not.

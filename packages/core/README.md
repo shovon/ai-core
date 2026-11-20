@@ -103,7 +103,7 @@ const writeFileTool = {
   name: "write_file",
   description: "Write a UTF-8 text file.",
   schema: { type: "object", properties: { path: { type: "string" }, text: { type: "string" } }, required: ["path", "text"] },
-  anthropic: { eager_input_streaming: true },
+  settings: { anthropic: { eager_input_streaming: true } },
 } as const satisfies AnthropicTool;
 ```
 
@@ -356,7 +356,7 @@ const seen = await text(provider({ messages: [user("What is in this picture?", f
 
 The Anthropic provider sends JPEG, PNG, GIF and WebP images, PDFs and plain text files. Any other type is an error, never a silent drop. A text file goes as the text itself, so it cannot be given by link.
 
-A file may carry Anthropic's own settings for it, in a field under Anthropic's name: every one its API has for a document, such as `citations`, `title`, `context` and `cache_control`. On a PDF or a text file they are sent as they are. An image takes only `cache_control`.
+A file may carry Anthropic's own settings for it, in its `settings`, under Anthropic's name: every one its API has for a document, such as `citations`, `title`, `context` and `cache_control`. On a PDF or a text file they are sent as they are. An image takes only `cache_control`.
 
 ### A link the provider cannot follow
 
@@ -411,7 +411,7 @@ import type { AnthropicMessage } from "@ai-patterns/anthropic-provider";
 
 const report = {
   ...file("application/pdf", await readFile("report.pdf")),
-  anthropic: { citations: { enabled: true }, title: "Q3 report" },
+  settings: { anthropic: { citations: { enabled: true }, title: "Q3 report" } },
 };
 const messages: AnthropicMessage[] = [user(report, "What drove the margin change?")];
 messages.push(...(await collect(provider({ messages }))));
@@ -422,7 +422,7 @@ The turn then reads:
 ```ts
 [
   { type: "text", text: "Margins fell, mainly on freight." },
-  { type: "source", span: 18, quote: "Freight expense rose 31%.", title: "Q3 report", anthropic: { type: "page_location", start_page_number: 4, /* … */ } },
+  { type: "source", span: 18, quote: "Freight expense rose 31%.", title: "Q3 report", details: { anthropic: { type: "page_location", start_page_number: 4, /* … */ } } },
   { type: "text", text: " Pricing was flat." },
 ]
 ```
@@ -430,7 +430,7 @@ The turn then reads:
 - A source belongs to the text directly before it. Several in a row all support that same text.
 - `span` says how much of that text: its last `span` characters, counted as a string's `length` counts them. Here that is `"mainly on freight."`. Text joins whatever text came before it, so the part before a source may begin with words the source says nothing of. With no `span`, a source speaks for the whole text part before it.
 - `quote` is the passage relied on, `title` what it is from, and `url` where that is, when it is on the web. `isSource` picks a source out.
-- Whatever else a provider knows is in a field under its name. With Anthropic it is the citation as its API gave it: the document, and the pages or characters cited.
+- Whatever else a provider knows is in the source's `details`, under the provider's name. With Anthropic it is the citation as its API gave it: the document, and the pages or characters cited.
 - A source is no part of the answer: `text` leaves it out.
 - The Anthropic provider sends its own sources back, as citations on the passage they support, and leaves out every other provider's.
 
@@ -448,7 +448,7 @@ for (const [i, part] of turn.content.entries()) {
 - A `reasoning` part is what the model says of its own working. It is for showing and is never sent back; `isReasoning` picks it out. With Anthropic, put `thinking: { type: "adaptive", display: "summarized" }` in its settings to receive its text.
 - `totalUsage(messages)` adds up what the model turns in a history cost: `input`, `output`, `cacheRead`, `cacheWrite` and `reasoning` tokens.
 - `reasoning` is the part of `output` spent reasoning, never a count beside it. A turn carries it only when the provider says how much it was; in a total, a turn that does not say counts as none.
-- What a provider counts beyond these is in its own account of the response, under its name on the turn. With Anthropic that is `turn.anthropic?.usage`: the cache split by lifetime, server tool requests, the service tier.
+- What a provider counts beyond these is in its own account of the response, in the turn's `details` under its name. With Anthropic that is `turn.details?.anthropic?.usage`: the cache split by lifetime, server tool requests, the service tier.
 
 ## What the provider said of a response
 
@@ -462,17 +462,17 @@ const turn = messages.at(-1);
 if (turn?.from === "model") {
   turn.id; // "msg_01…": the provider's name for this response
   turn.model; // the model that answered, as the provider names it
-  turn.anthropic?.request_id; // the request's id, to quote to Anthropic
-  turn.anthropic?.stop_sequence; // which stop sequence matched, if one did
-  turn.anthropic?.usage; // usage as Anthropic counts it, with all its detail
+  turn.details?.anthropic?.request_id; // the request's id, to quote to Anthropic
+  turn.details?.anthropic?.stop_sequence; // which stop sequence matched, if one did
+  turn.details?.anthropic?.usage; // usage as Anthropic counts it, with all its detail
 }
 ```
 
 - `id` and `model` are shared: every provider that knows them says them the same way.
-- Everything else a provider says is in a field under its name. With Anthropic it is the message as its API ended it, without the content, plus `request_id`. It is the API's own object, so a field Anthropic adds later arrives with a newer SDK.
+- Everything else a provider says is in the turn's `details`, under the provider's name. With Anthropic it is the message as its API ended it, without the content, plus `request_id`. It is the API's own object, so a field Anthropic adds later arrives with a newer SDK.
 - All of it comes on the `end` chunk that closes the turn, and `append` keeps whatever an `end` carries on the turn. So it is in a stored history too, as plain JSON.
 - None of it is ever sent. A provider reads only a turn's content.
-- Typed as `AnthropicMessage`, a turn's `anthropic` field is typed. In a history typed more widely it is there all the same, for you to narrow.
+- Typed as `AnthropicMessage`, what a turn's `details` hold under Anthropic's name is typed. In a history typed more widely it is there all the same, for you to narrow.
 - Response headers are not kept on a turn. The [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#keep-a-responses-headers) shows how to read them, and how to keep them.
 
 ## Cancelling
@@ -500,11 +500,11 @@ const results = await Promise.all(pendingToolCalls(messages).map(answer));
 
 ## Caching with Anthropic
 
-A shared part may carry a hint for one provider. It changes cost, never meaning, and every other provider ignores it.
+A shared part may carry a hint for one provider, in its `settings`, under the provider's name. It changes cost, never meaning, and every other provider ignores it.
 
 ```ts
 const reply = provider({
-  system: [{ type: "text", text: instructions, anthropic: { cache_control: { type: "ephemeral" } } }],
+  system: [{ type: "text", text: instructions, settings: { anthropic: { cache_control: { type: "ephemeral" } } } }],
   messages,
 });
 ```
@@ -513,7 +513,7 @@ For automatic caching, put `cache_control: { type: "ephemeral" }` in Anthropic's
 
 ## Tool settings for Anthropic
 
-A tool may carry Anthropic's own settings for it, in a field under Anthropic's name.
+A tool may carry Anthropic's own settings for it, in its `settings`, under Anthropic's name.
 
 ```ts
 import type { AnthropicTool } from "@ai-patterns/anthropic-provider";
@@ -527,13 +527,13 @@ const readFileTool = {
     required: ["path"],
     additionalProperties: false,
   },
-  anthropic: { strict: true, cache_control: { type: "ephemeral" } },
+  settings: { anthropic: { strict: true, cache_control: { type: "ephemeral" } } },
 } as const satisfies AnthropicTool;
 ```
 
-- The field takes every setting Anthropic's API has for a tool you define, among them `strict`, `cache_control`, `eager_input_streaming`, `input_examples`, `defer_loading` and `allowed_callers`. It is sent as it is, so a setting Anthropic adds later needs nothing from the provider but a newer SDK for its type.
-- What the tool is comes from the tool: its name, description and schema cannot be set in the field.
-- Every other provider ignores the field and is told the same tool. `parse(readFileTool.schema, call.input)` reads a call's input as before.
+- The entry takes every setting Anthropic's API has for a tool you define, among them `strict`, `cache_control`, `eager_input_streaming`, `input_examples`, `defer_loading` and `allowed_callers`. It is sent as it is, so a setting Anthropic adds later needs nothing from the provider but a newer SDK for its type.
+- What the tool is comes from the tool: its name, description and schema cannot be set in the entry.
+- Every other provider ignores the entry and is told the same tool. `parse(readFileTool.schema, call.input)` reads a call's input as before.
 - A tool's schema is sent as you wrote it. It is not fitted the way a shape's is, so where a setting narrows what Anthropic takes, its API is what says so.
 
 ## Settings
@@ -555,7 +555,7 @@ const answer = await text(
 - A request with no entry for Anthropic is refused before anything is sent: there is no model to send it to.
 - What the request is comes from the request: `messages` and `system` cannot be set there, and neither can a tool you define. A `shape` on the request is used in place of a `format` in `output_config`.
 - `settings` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other.
-- Which stop sequence ended a turn is on the turn, as `turn.anthropic?.stop_sequence`.
+- Which stop sequence ended a turn is on the turn, as `turn.details?.anthropic?.stop_sequence`.
 - A timeout, a header and retries for one request are not settings. They are the SDK's own options for a call, and the [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#set-a-timeout-or-a-header-for-one-request) shows how to give them.
 
 Nothing in the library fills settings in. They are a value, so sharing them and changing them is ordinary TypeScript:
@@ -619,7 +619,7 @@ What a tool that Anthropic runs did is in the turn:
 - A failure is there too, in what came of the call. Nothing is thrown.
 - A long turn may end as `pause`. The loop above sends it back as it is.
 - Where the answer cites what web search found, each citation is a `source` part with its `url`.
-- The count of what was asked of each tool is in `turn.anthropic?.usage.server_tool_use`.
+- The count of what was asked of each tool is in `turn.details?.anthropic?.usage.server_tool_use`.
 
 A tool of Anthropic's that you run, such as bash, yields a `tool_call` like any other. Run it and answer with `toolResult`. It has no schema of yours for `parse` to check its input against.
 
@@ -627,7 +627,7 @@ Sending such a history later:
 
 - A history in which Anthropic searched, fetched or ran code can be sent without the tool.
 - One in which tool search found a tool of yours cannot: Anthropic refuses it unless that tool is still in the request.
-- Code runs in a container that Anthropic keeps. Its id and when it expires are on the turn, as `turn.anthropic?.container`. To use the same one again, files and all, put the id in the next request's settings as `container`.
+- Code runs in a container that Anthropic keeps. Its id and when it expires are on the turn, as `turn.details?.anthropic?.container`. To use the same one again, files and all, put the id in the next request's settings as `container`.
 
 The computer and browser toolsets can be put in the settings too, but they are not supported yet: see [What is not here](#what-is-not-here).
 
@@ -652,12 +652,13 @@ For a real one:
 - A kind of part of your own may be yielded in pieces too. Export the rule that joins them beside your provider (see [A part of your own, in pieces](#a-part-of-your-own-in-pieces)).
 - To tell of a tool call as it is written, yield `tool_input` parts for it, one after another with nothing between them, and then the call itself directly after. The call is still yielded whole, and the pieces are yours to leave out.
 - A history may hold `tool_input` parts whose call never arrived. Leave them out of what you send, as you do reasoning.
-- If your model says where its words came from, yield a `source` part directly after the text it supports, whole, with a `span`: the length of that text as you yielded it. Put what only your API knows of it in a field under your provider's name. Send your own sources back if your API takes them, and leave out everyone else's.
-- A file may carry a field under your provider's name, holding your API's own settings for it. Read it on a file in a message, not on one inside a tool result.
-- Anything only your API understands travels as a `native` part carrying your provider's name. Send your own native parts back and leave out everyone else's, so one history can pass between providers.
-- Close each turn with an `end` chunk. Besides the reason and usage, say the response's `id` and `model` if your API gives them, and put whatever else it says of the response in a field under your provider's name. Keep it plain JSON, with nothing undefined in it, and leave the content out. `append` keeps all of it on the turn.
+- If your model says where its words came from, yield a `source` part directly after the text it supports, whole, with a `span`: the length of that text as you yielded it. Put what only your API knows of it in its `details`, under your provider's name. Send your own sources back if your API takes them, and leave out everyone else's.
+- A file may carry your API's own settings for it, in its `settings` under your provider's name. Read them on a file in a message, not on one inside a tool result.
+- What else only your API understands sits in one of two fields, under your provider's name, and nowhere else. `settings` is for what is addressed to you, on a part, a tool or a request. `details` is for what you say, of a response or of a source. Put no field of your own beside the library's.
+- Anything only your API understands that is a part of its own travels as a `native` part carrying your provider's name. Send your own native parts back and leave out everyone else's, so one history can pass between providers.
+- Close each turn with an `end` chunk. Besides the reason and usage, say the response's `id` and `model` if your API gives them, and put whatever else it says of the response in the end's `details`, under your provider's name. Keep it plain JSON, with nothing undefined in it, and leave the content out. `append` keeps all of it on the turn.
 - Build what you send from the fields you know. Never forward a part whole.
-- A tool may carry a field under your provider's name, holding your API's own settings for it. It is addressed to you alone, so you may send it as it is. Take the tool's name, description and schema from the tool itself, after the field, so nothing in it can replace them. Ignore a field under any other name.
+- A tool may carry your API's own settings for it, in its `settings` under your provider's name. They are addressed to you alone, so you may send them as they are. Take the tool's name, description and schema from the tool itself, after them, so nothing there can replace them. Ignore an entry under any other name.
 - `fitToolIds` rewrites tool-call ids your API cannot accept, and `answerToolCalls` gives a result to any call that has none. Both return a copy and leave the history as it was.
 - A request may carry a `shape`. Send its schema in the form your API takes: `fitSchema` takes every schema inside it, innermost first, through a function of yours, and returns a copy.
   - You may loosen a schema, by leaving out a bound your API cannot enforce and saying it in the description, or tighten it, by closing an object your API needs closed.
