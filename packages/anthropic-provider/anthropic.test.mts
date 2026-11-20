@@ -2816,3 +2816,58 @@ test("a provider of the caller's own, made from the two halves, keeps a response
   });
   assert.equal(await text(made), "Hi.");
 });
+
+// The recipe in this package's README, as it is written there: a provider of
+// the caller's own, made from the two halves, that gives the SDK its options
+// for one request.
+const withOptions = (client: Anthropic, options: Anthropic.RequestOptions) =>
+  async function* (request: AnthropicRequest) {
+    yield* read(
+      client.messages.stream(params(request), {
+        ...options,
+        signal: request.signal,
+      }),
+    );
+  };
+
+test("a provider of the caller's own, made from the two halves, gives the SDK its options for one request", async () => {
+  const asked: Headers[] = [];
+  const sdk = new Anthropic({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      asked.push(new Headers(init?.headers));
+      return new Response(says("Hi."), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const request: AnthropicRequest = {
+    messages: [user("hi")],
+    settings: { anthropic: options },
+  };
+
+  // It is a provider like the one it is made from, and fits where that does.
+  const traced: Takes<AnthropicRequest, AnthropicOut> = withOptions(sdk, {
+    headers: { "x-trace": "t1" },
+  });
+  const made = traced(request);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(asked.length, 0);
+  assert.equal(await text(made), "Hi.");
+  assert.equal(asked[0]?.get("x-trace"), "t1");
+
+  // One client serves both, and each call is made with its own options.
+  assert.equal(await text(anthropic(sdk)(request)), "Hi.");
+  assert.equal(asked[1]?.get("x-trace"), null);
+
+  // Cancelling is the request's own: a signal among the options is not used.
+  const stopped = new AbortController();
+  stopped.abort();
+  assert.equal(
+    await text(withOptions(sdk, { signal: stopped.signal })(request)),
+    "Hi.",
+  );
+  await assert.rejects(
+    text(withOptions(sdk, {})({ ...request, signal: stopped.signal })),
+  );
+});

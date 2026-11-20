@@ -50,6 +50,42 @@ stream.response?.headers.get("anthropic-ratelimit-requests-remaining");
 - `read` yields one turn, closed by one `end`, exactly as the provider does. It takes anything that has the stream's events, its `currentMessage`, its `finalMessage()` and its `request_id`.
 - This is code written against Anthropic's SDK. Code that is handed a provider cannot do it, because it never sees the client.
 
+## Set a timeout or a header for one request
+
+A timeout, a header and retries are the SDK's own options for one request. They are no part of a request's settings, and the provider passes none of them. A provider of your own that does is a few lines around the two halves:
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { text, user } from "@ai-patterns/core";
+import { params, read, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+
+const withOptions = (client: Anthropic, options: Anthropic.RequestOptions) =>
+  async function* (request: AnthropicRequest) {
+    yield* read(client.messages.stream(params(request), { ...options, signal: request.signal }));
+  };
+
+const client = new Anthropic();
+const settings = { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } };
+
+// The options every request shares: a provider made with them.
+const claude = withOptions(client, { timeout: 30_000, maxRetries: 0 });
+
+// One request that differs: a provider made for it, from the same client.
+const title = await text(
+  withOptions(client, { timeout: 5_000, headers: { "x-trace": "t1" } })({
+    messages: [user("Give this conversation a title.")],
+    settings,
+  }),
+);
+```
+
+- The options are the SDK's own type: `headers`, `timeout`, `maxRetries`, `idempotencyKey` and the rest. One the SDK adds later needs nothing but a newer SDK.
+- One client serves every provider made this way, and `anthropic(client)` beside them. Different options never need a second client.
+- They are not on the request, so a request stays plain data even where an option is not, such as `middleware`, which holds functions.
+- Cancelling is the request's own. Its `signal` comes after the options, so a `signal` among them is not used.
+- It is a provider like the one it is made from. It fits wherever `anthropic(client)` does, and sends nothing until its stream is first read.
+- Code that is handed a provider cannot set these. Hand it one that has them already.
+
 ## Keep a response's headers
 
 The provider does not keep a response's headers. A provider of your own that does is a few lines around the two halves:
