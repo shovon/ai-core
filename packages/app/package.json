@@ -38,8 +38,8 @@
     "vite": "^8.3.7"
   },
   "dependencies": {
-    "@ai-idioms/core": "*",
-    "@ai-idioms/anthropic-provider": "*",
+    "@ai-patterns/core": "*",
+    "@ai-patterns/anthropic-provider": "*",
     "@ai-agent-library/tree": "*",
     "@anthropic-ai/sdk": "^1.8.0",
     "katex": "^0.16.47",

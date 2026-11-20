@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse, type AnyMessage, type End, type PortableMessage, type Provider } from '@ai-idioms/core';
+import { parse, type AnyMessage, type End, type PortableMessage, type Provider } from '@ai-patterns/core';
 import { children, path } from '@ai-agent-library/tree';
 import { createThreads, titleOf, TOOL_ROUNDS, type Tool } from './threads.ts';
 import { memoryStore } from './memory-store.ts';

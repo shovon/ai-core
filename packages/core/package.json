@@ -1,5 +1,5 @@
 {
-  "name": "@ai-idioms/core",
+  "name": "@ai-patterns/core",
   "version": "0.1.0",
   "description": "Plain values and functions for talking to a model: parts, messages, one provider port, and the pieces of a tool loop.",
   "license": "MIT",

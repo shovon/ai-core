@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, SubmitEvent } from 'react';
-import { isReasoning, isText, isToolCall, isToolInput, type AnyMessage, type Part, type ToolCall, type ToolResult } from '@ai-idioms/core';
+import { isReasoning, isText, isToolCall, isToolInput, type AnyMessage, type Part, type ToolCall, type ToolResult } from '@ai-patterns/core';
 import Markdown from '../Markdown/Markdown.tsx';
 
 /** One message on screen. */

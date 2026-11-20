@@ -1,10 +1,10 @@
-# @ai-idioms/anthropic-provider
+# @ai-patterns/anthropic-provider
 
-Anthropic's API as a provider for [`@ai-idioms/core`](../core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it.
+Anthropic's API as a provider for [`@ai-patterns/core`](../core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it.
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic } from "@ai-idioms/anthropic-provider";
+import { anthropic } from "@ai-patterns/anthropic-provider";
 
 const claude = anthropic(new Anthropic());
 ```
@@ -16,7 +16,7 @@ How to use it is in the library's README, for now: [settings](../core/README.md#
 The Anthropic provider is two functions put together, and both are exported. `params` makes what Anthropic's SDK is asked from a request. `read` makes the library's parts from the SDK's stream.
 
 ```ts
-import { params, read } from "@ai-idioms/anthropic-provider";
+import { params, read } from "@ai-patterns/anthropic-provider";
 
 // What `anthropic(client)` does with a request, once its stream is first read:
 const parts = read(client.messages.stream(params(request), { signal: request.signal }));
@@ -25,8 +25,8 @@ const parts = read(client.messages.stream(params(request), { signal: request.sig
 The provider does not pass on everything Anthropic says. To reach the rest, make the call and keep hold of the SDK's stream:
 
 ```ts
-import { append, type Reply } from "@ai-idioms/core";
-import { params, read, type AnthropicOut } from "@ai-idioms/anthropic-provider";
+import { append, type Reply } from "@ai-patterns/core";
+import { params, read, type AnthropicOut } from "@ai-patterns/anthropic-provider";
 
 const stream = client.messages.stream(params(request), { signal, timeout: 30_000 });
 stream.on("streamEvent", (event) => {
@@ -52,8 +52,8 @@ The provider does not keep a response's headers. A provider of your own that doe
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { isEnd } from "@ai-idioms/core";
-import { params, read, type AnthropicMessage, type AnthropicRequest } from "@ai-idioms/anthropic-provider";
+import { isEnd } from "@ai-patterns/core";
+import { params, read, type AnthropicMessage, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
 // Which headers are kept is yours to say. Here: what Anthropic says of the rate limits.
 const rateLimits = (headers: Headers | undefined) =>
@@ -74,7 +74,7 @@ const claude = keepingHeaders(new Anthropic());
 To read them from a turn, say that your history may hold them:
 
 ```ts
-import { collect, user } from "@ai-idioms/core";
+import { collect, user } from "@ai-patterns/core";
 
 type KeepingHeaders = AnthropicMessage & { anthropic?: { headers?: Record<string, string> } };
 

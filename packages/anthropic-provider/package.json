@@ -1,7 +1,7 @@
 {
-  "name": "@ai-idioms/anthropic-provider",
+  "name": "@ai-patterns/anthropic-provider",
   "version": "0.1.0",
-  "description": "Anthropic's API as a provider for @ai-idioms/core: the vendor's API behind the library's one port. The SDK is yours to install.",
+  "description": "Anthropic's API as a provider for @ai-patterns/core: the vendor's API behind the library's one port. The SDK is yours to install.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
     "typecheck": "tsc"
   },
   "dependencies": {
-    "@ai-idioms/core": "^0.1.0"
+    "@ai-patterns/core": "^0.1.0"
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": "^1.8.0"

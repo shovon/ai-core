@@ -9,8 +9,8 @@ Plain values and functions for talking to a model, in TypeScript. This is an idi
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { collect, pendingToolCalls, toolResult, user, type ToolSpec } from "@ai-idioms/core";
-import { anthropic, type AnthropicMessage } from "@ai-idioms/anthropic-provider";
+import { collect, pendingToolCalls, toolResult, user, type ToolSpec } from "@ai-patterns/core";
+import { anthropic, type AnthropicMessage } from "@ai-patterns/anthropic-provider";
 
 // A provider is a function. This one is Anthropic's.
 const claude = anthropic(new Anthropic());
@@ -41,8 +41,8 @@ The whole of it is in [the core package's README](packages/core/README.md): stre
 
 | Package | What it is | Published |
 | --- | --- | --- |
-| [`@ai-idioms/core`](packages/core/README.md) | The values and functions: parts, messages, the one interface a provider fits, and the pieces of a tool loop. No dependencies. | Not yet |
-| [`@ai-idioms/anthropic-provider`](packages/anthropic-provider/README.md) | Anthropic's API as a provider. Anthropic's SDK is yours to install. | Not yet |
+| [`@ai-patterns/core`](packages/core/README.md) | The values and functions: parts, messages, the one interface a provider fits, and the pieces of a tool loop. No dependencies. | Not yet |
+| [`@ai-patterns/anthropic-provider`](packages/anthropic-provider/README.md) | Anthropic's API as a provider. Anthropic's SDK is yours to install. | Not yet |
 | [`tree`](packages/tree/tree.ts) | A tree as plain data, so a conversation can fork. Used by the app. | No |
 | [`app`](packages/app) | A desktop chat app built on the packages, to find out what they are good for. | No |
 
@@ -50,7 +50,7 @@ Nothing is on npm yet. [#17](https://github.com/shovon/ai-core/issues/17) tracks
 
 ## Write your own provider
 
-A provider is one function, and the one for Anthropic uses nothing that yours could not: from the library, it imports only what `@ai-idioms/core` exports. A provider for another vendor is a package of your own, under any name, with no need to be added here.
+A provider is one function, and the one for Anthropic uses nothing that yours could not: from the library, it imports only what `@ai-patterns/core` exports. A provider for another vendor is a package of your own, under any name, with no need to be added here.
 
 [Write a provider](packages/core/README.md#write-a-provider) says what one has to do. The first example there is a whole provider in four lines, which is all a test needs.
 

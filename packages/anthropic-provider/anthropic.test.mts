@@ -40,7 +40,7 @@ import {
   type ToolCall,
   type ToolInputPart,
   type ToolSpec,
-} from "@ai-idioms/core";
+} from "@ai-patterns/core";
 
 // The real SDK, with fetch replaced by canned server-sent-event replies.
 const sse = (events: object[]) =>

@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite';
-import { user, type PortableMessage } from '@ai-idioms/core';
+import { user, type PortableMessage } from '@ai-patterns/core';
 import type { ModelPart } from '../../shared/threads.ts';
 import Thread, { type Row } from './Thread.tsx';
 

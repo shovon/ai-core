@@ -1,7 +1,7 @@
 // Searching the web, as a tool the model may call. Written against one thing
 // it needs: something that searches. Where the results come from is an
 // adapter's business; see cloudflare.ts.
-import { parse, type ToolCall, type ToolSpec } from '@ai-idioms/core';
+import { parse, type ToolCall, type ToolSpec } from '@ai-patterns/core';
 
 /** One search result. */
 export type Found = { url: string; title: string; description: string };
