@@ -1,6 +1,10 @@
 # @ai-patterns/anthropic-provider
 
-Anthropic's API as a provider for [`@ai-patterns/core`](../core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it.
+Anthropic's API as a provider for [`@ai-patterns/core`](https://github.com/shovon/ai-core/blob/main/packages/core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it.
+
+```sh
+npm install @ai-patterns/core @ai-patterns/anthropic-provider @anthropic-ai/sdk
+```
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
@@ -9,7 +13,7 @@ import { anthropic } from "@ai-patterns/anthropic-provider";
 const claude = anthropic(new Anthropic());
 ```
 
-How to use it is in the library's README, for now: [settings](../core/README.md#settings), [files](../core/README.md#files), [sources](../core/README.md#sources), [caching](../core/README.md#caching-with-anthropic), [tool settings](../core/README.md#tool-settings-for-anthropic) and [Anthropic's own tools](../core/README.md#anthropics-own-tools). What follows is said only here.
+How to use it is in the library's README, for now: [settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#settings), [files](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#files), [sources](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#sources), [caching](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#caching-with-anthropic), [tool settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#tool-settings-for-anthropic) and [Anthropic's own tools](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#anthropics-own-tools). What follows is said only here.
 
 ## Make the call yourself
 

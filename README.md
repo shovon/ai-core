@@ -7,6 +7,10 @@ Plain values and functions for talking to a model, in TypeScript. This is an idi
 - A tool is plain data. Running it is your code.
 - An agent is a `for` loop you write.
 
+```sh
+npm install @ai-patterns/core @ai-patterns/anthropic-provider @anthropic-ai/sdk
+```
+
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 import { collect, pendingToolCalls, toolResult, user, type ToolSpec } from "@ai-patterns/core";
@@ -41,12 +45,12 @@ The whole of it is in [the core package's README](packages/core/README.md): stre
 
 | Package | What it is | Published |
 | --- | --- | --- |
-| [`@ai-patterns/core`](packages/core/README.md) | The values and functions: parts, messages, the one interface a provider fits, and the pieces of a tool loop. No dependencies. | Not yet |
-| [`@ai-patterns/anthropic-provider`](packages/anthropic-provider/README.md) | Anthropic's API as a provider. Anthropic's SDK is yours to install. | Not yet |
+| [`@ai-patterns/core`](packages/core/README.md) | The values and functions: parts, messages, the one interface a provider fits, and the pieces of a tool loop. No dependencies. | [On npm](https://www.npmjs.com/package/@ai-patterns/core) |
+| [`@ai-patterns/anthropic-provider`](packages/anthropic-provider/README.md) | Anthropic's API as a provider. Anthropic's SDK is yours to install. | [On npm](https://www.npmjs.com/package/@ai-patterns/anthropic-provider) |
 | [`tree`](packages/tree/tree.ts) | A tree as plain data, so a conversation can fork. Used by the app. | No |
 | [`app`](packages/app) | A desktop chat app built on the packages, to find out what they are good for. | No |
 
-Nothing is on npm yet. [#17](https://github.com/shovon/ai-core/issues/17) tracks the work of publishing.
+The two published packages are ES modules, with their types included.
 
 ## Write your own provider
 
@@ -70,6 +74,8 @@ npm run lint
 ```
 
 Inside the workspace the packages are read as source, so none of those needs a build. `npm run build` makes what is published: each package's `dist/`.
+
+A package in the workspace depends on them as `"*"`, and reads them as source by naming the `@ai-patterns/source` condition: `node -C @ai-patterns/source`, `customConditions` in a tsconfig, or `resolve.conditions` in Vite. Without the condition they are read from `dist/`.
 
 A pull request that changes a published package says so with a changeset: run `npx changeset` and commit the file it writes. [.changeset/README.md](.changeset/README.md) says how big a change to call it.
 

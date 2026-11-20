@@ -4,11 +4,17 @@ Plain values and functions for talking to a model. A conversation is an array yo
 
 ## Setup
 
-The packages are not on npm yet. Inside this workspace, add them to a package's dependencies as `"*"`.
+```sh
+npm install @ai-patterns/core
+```
 
-A package in the workspace can read them as TypeScript source, with nothing to build, by naming the `@ai-patterns/source` condition: `node -C @ai-patterns/source`, `customConditions` in a tsconfig, or `resolve.conditions` in Vite. Without the condition they are read from `dist/`, which `npm run build` at the repo's root makes.
+The package is an ES module with its types included, and it has no dependencies.
 
 A provider is a package of its own. Anthropic's is `@ai-patterns/anthropic-provider`. You install the vendor's SDK yourself and hand the provider a client.
+
+```sh
+npm install @ai-patterns/anthropic-provider @anthropic-ai/sdk
+```
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
@@ -467,7 +473,7 @@ if (turn?.from === "model") {
 - All of it comes on the `end` chunk that closes the turn, and `append` keeps whatever an `end` carries on the turn. So it is in a stored history too, as plain JSON.
 - None of it is ever sent. A provider reads only a turn's content.
 - Typed as `AnthropicMessage`, a turn's `anthropic` field is typed. In a history typed more widely it is there all the same, for you to narrow.
-- Response headers are not kept on a turn. The [Anthropic provider's README](../anthropic-provider/README.md#keep-a-responses-headers) shows how to read them, and how to keep them.
+- Response headers are not kept on a turn. The [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#keep-a-responses-headers) shows how to read them, and how to keep them.
 
 ## Cancelling
 
