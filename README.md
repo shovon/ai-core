@@ -1,4 +1,4 @@
-# ai-idioms
+# ai-patterns
 
 Plain values and functions for talking to a model, in TypeScript. This is an idiom more than a framework: a few small pieces that you put together in code of your own.
 
