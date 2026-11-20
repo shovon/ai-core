@@ -2871,3 +2871,81 @@ test("a provider of the caller's own, made from the two halves, gives the SDK it
     text(withOptions(sdk, {})({ ...request, signal: stopped.signal })),
   );
 });
+
+// The second recipe of that section, as it is written there: a provider whose
+// request carries the SDK's options, in a field of the caller's own.
+type RequestWithOptions = AnthropicRequest & {
+  options?: Anthropic.RequestOptions;
+};
+const takingOptions = (
+  client: Anthropic,
+): Takes<RequestWithOptions, AnthropicOut> =>
+  async function* (request) {
+    yield* read(
+      client.messages.stream(params(request), {
+        ...request.options,
+        signal: request.signal,
+      }),
+    );
+  };
+
+test("a provider of the caller's own takes the SDK's options from a field of its own on the request, and never sends the field", async () => {
+  const asked: Headers[] = [];
+  const sent: any[] = [];
+  const sdk = new Anthropic({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      asked.push(new Headers(init?.headers));
+      sent.push(JSON.parse(String(init?.body)));
+      return new Response(says("Hi."), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const claude = takingOptions(sdk);
+  const request: AnthropicRequest = {
+    messages: [user("hi")],
+    settings: { anthropic: options },
+  };
+
+  // One provider serves every request, and each says its own options.
+  assert.equal(
+    await text(
+      claude({ ...request, options: { headers: { "x-trace": "t1" } } }),
+    ),
+    "Hi.",
+  );
+  assert.equal(await text(claude(request)), "Hi.");
+  assert.equal(asked[0]?.get("x-trace"), "t1");
+  assert.equal(asked[1]?.get("x-trace"), null);
+  // The field is the caller's: nothing of it is sent.
+  assert.equal("options" in sent[0], false);
+  assert.deepEqual(sent[0], sent[1]);
+
+  // A request with no options is Anthropic's own, so the provider fits where
+  // `anthropic(client)` does, and sends nothing until its stream is first read.
+  const provider: Takes<AnthropicRequest, AnthropicOut> = claude;
+  const made = provider(request);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(asked.length, 2);
+  assert.equal(await text(made), "Hi.");
+
+  // The options that are plain data go through JSON with the request.
+  const stored: RequestWithOptions = JSON.parse(
+    JSON.stringify({
+      ...request,
+      options: { timeout: 5_000, headers: { "x-trace": "t2" } },
+    }),
+  );
+  assert.equal(await text(claude(stored)), "Hi.");
+  assert.equal(asked.at(-1)?.get("x-trace"), "t2");
+
+  // Cancelling is still the request's own: a signal among the options is not used.
+  const stopped = new AbortController();
+  stopped.abort();
+  assert.equal(
+    await text(claude({ ...request, options: { signal: stopped.signal } })),
+    "Hi.",
+  );
+  await assert.rejects(text(claude({ ...request, signal: stopped.signal })));
+});
