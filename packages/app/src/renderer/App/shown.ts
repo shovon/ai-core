@@ -1,6 +1,6 @@
 // What the page knows of one thread, and how each event from main changes it.
 // Pure: the page's state is a fold of the events it has heard.
-import { append, type Part, type Reply } from '@ai-agent-library/library';
+import { append, type Part, type Reply } from '@ai-idioms/core';
 import { add, path, tip, type Tree } from '@ai-agent-library/tree';
 import type { Item, Opened, Thread, ThreadEvent } from '../../shared/threads.ts';
 import type { Row } from '../Thread/Thread.tsx';

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ToolCall } from "@ai-agent-library/library";
+import type { ToolCall } from "@ai-idioms/core";
 import { cloudflareSearch } from "./cloudflare.ts";
 import { listed, webSearch, type Found, type Search } from "./web-search.ts";
 

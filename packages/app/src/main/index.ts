@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import Anthropic from '@anthropic-ai/sdk';
-import { anthropic, type AnthropicSettings } from '@ai-agent-library/providers/anthropic';
+import { anthropic, type AnthropicSettings } from '@ai-idioms/anthropic-provider';
 import { openMigrated } from './sqlite.ts';
 import { settings } from './settings.ts';
 import { cloudflareSearch } from './features/web-search/cloudflare.ts';

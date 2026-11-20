@@ -1,11 +1,11 @@
 {
-  "name": "@ai-agent-library/library",
+  "name": "@ai-idioms/core",
   "version": "0.1.0",
   "description": "Plain values and functions for talking to a model: parts, messages, one provider port, and the pieces of a tool loop.",
   "private": true,
   "type": "module",
-  "main": "./library.ts",
-  "exports": "./library.ts",
+  "main": "./core.ts",
+  "exports": "./core.ts",
   "scripts": {
     "test": "node --test \"*.test.mts\"",
     "typecheck": "tsc"

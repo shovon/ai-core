@@ -1,0 +1,24 @@
+{
+  "name": "@ai-idioms/anthropic-provider",
+  "version": "0.1.0",
+  "description": "Anthropic's API as a provider for @ai-idioms/core: the vendor's API behind the library's one port. The SDK is yours to install.",
+  "private": true,
+  "type": "module",
+  "main": "./anthropic.ts",
+  "exports": "./anthropic.ts",
+  "scripts": {
+    "test": "node --test \"*.test.mts\"",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@ai-idioms/core": "*"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": "^1.8.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

@@ -44,7 +44,7 @@ import {
   type ToolResult,
   type ToolSpec,
   type UserMessage,
-} from "./library.ts";
+} from "./core.ts";
 
 // A provider that plays back one scripted turn per call. It accepts any
 // message, so it can stand in wherever a narrower provider is expected.
@@ -63,7 +63,7 @@ const played = async function* (...chunks: (Part | End)[]) {
   yield* chunks;
 };
 
-// The loop from library.ts: the same call again with a longer history, until the model asks for nothing.
+// The loop from core.ts: the same call again with a longer history, until the model asks for nothing.
 const loop = async (
   provider: Provider<AnyMessage, Part>,
   messages: AnyMessage[],

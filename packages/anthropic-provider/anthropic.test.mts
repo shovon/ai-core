@@ -40,7 +40,7 @@ import {
   type ToolCall,
   type ToolInputPart,
   type ToolSpec,
-} from "@ai-agent-library/library";
+} from "@ai-idioms/core";
 
 // The real SDK, with fetch replaced by canned server-sent-event replies.
 const sse = (events: object[]) =>
