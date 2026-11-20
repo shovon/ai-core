@@ -84,7 +84,43 @@ const title = await text(
 - They are not on the request, so a request stays plain data even where an option is not, such as `middleware`, which holds functions.
 - Cancelling is the request's own. Its `signal` comes after the options, so a `signal` among them is not used.
 - It is a provider like the one it is made from. It fits wherever `anthropic(client)` does, and sends nothing until its stream is first read.
-- Code that is handed a provider cannot set these. Hand it one that has them already.
+- Code that is handed a provider cannot set these. Hand it one that has them already, or one whose requests carry them, as below.
+
+### Options on the request
+
+To say the options request by request, make a provider whose request carries them. The field is your own, on a request type of your own:
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { text, user, type Takes } from "@ai-patterns/core";
+import { params, read, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+
+// A request for Anthropic, with the SDK's options for it beside the rest.
+type RequestWithOptions = AnthropicRequest & { options?: Anthropic.RequestOptions };
+
+const takingOptions = (client: Anthropic): Takes<RequestWithOptions, AnthropicOut> =>
+  async function* (request) {
+    yield* read(client.messages.stream(params(request), { ...request.options, signal: request.signal }));
+  };
+
+const claude = takingOptions(new Anthropic());
+const settings = { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } };
+
+const title = await text(
+  claude({
+    messages: [user("Give this conversation a title.")],
+    settings,
+    options: { timeout: 5_000, headers: { "x-trace": "t1" } },
+  }),
+);
+```
+
+- `params` reads only the fields of a request that it knows, so `options` is never sent to Anthropic. The name is yours to choose, and the library gives it no meaning: another provider handed such a request ignores the field.
+- One provider serves every request, whatever its options. Code that is handed it can set them, and a wrapper that holds state around it, such as a budget, sees every call.
+- A request with no options is an `AnthropicRequest`, so this provider fits wherever `anthropic(client)` does.
+- A request that is stored keeps the options that are plain data, such as a timeout and headers. `middleware` holds functions, which do not survive JSON.
+- A header may hold a secret, and on a request it goes wherever the request goes.
+- Cancelling is still the request's own. Its `signal` comes after the options, so a `signal` among them is not used.
 
 ## Keep a response's headers
 
