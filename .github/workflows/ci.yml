@@ -1,0 +1,40 @@
+name: CI
+
+# Every pull request, and every push to main, so main's own state is known
+# after a merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The checks only read the repo.
+permissions:
+  contents: read
+
+# A new push to a pull request replaces the run before it. Runs on main are
+# each left to finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Typecheck, lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The tests run TypeScript as it is, so this is the Node the packages
+      # are written against.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
