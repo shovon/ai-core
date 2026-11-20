@@ -1,6 +1,7 @@
 {
-  // Checks the package and its tests; nothing is built. `node --test` runs
-  // the files as they are, which is why imports name their `.ts`.
+  // Checks the package and its tests; nothing is built here (see
+  // `tsconfig.build.json`). `node --test` runs the files as they are, which
+  // is why imports name their `.ts`.
   "compilerOptions": {
     "target": "esnext",
     "module": "nodenext",
