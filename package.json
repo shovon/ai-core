@@ -2,11 +2,10 @@
   "name": "ai-agent-library-workspace",
   "private": true,
   "workspaces": [
-    "app",
     "packages/*"
   ],
   "scripts": {
-    "start": "npm start --workspace app",
+    "start": "npm start --workspace ai-agent-library-app",
     "test": "npm test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
