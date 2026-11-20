@@ -555,6 +555,7 @@ const answer = await text(
 - What the request is comes from the request: `messages` and `system` cannot be set there, and neither can a tool you define. A `shape` on the request is used in place of a `format` in `output_config`.
 - `settings` is the one place on a request for a vendor's settings, and it is plain data. A provider reads the entry under its own name and ignores every other.
 - Which stop sequence ended a turn is on the turn, as `turn.anthropic?.stop_sequence`.
+- A timeout, a header and retries for one request are not settings. They are the SDK's own options for a call, and the [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#set-a-timeout-or-a-header-for-one-request) shows how to give them.
 
 Nothing in the library fills settings in. They are a value, so sharing them and changing them is ordinary TypeScript:
 
