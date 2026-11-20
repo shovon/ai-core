@@ -1,0 +1,165 @@
+name: Release
+
+# Runs on every push to main and does one of three things:
+#
+# - There are changesets: it opens the "Version Packages" pull request, or
+#   brings it up to date. Merging that pull request is what sets the new
+#   versions.
+# - There are none, and a package's version is not on npm: it packs that
+#   package and stages it on npm. A staged version cannot be installed until a
+#   maintainer approves it there, with two-factor authentication.
+# - Neither: nothing.
+#
+# npm trusts this workflow by its file name, so renaming the file means
+# changing each package's trusted publisher on npmjs.com.
+on:
+  push:
+    branches: [main]
+  # To stage again by hand, after something outside the repo was put right.
+  workflow_dispatch:
+
+# Each job asks for what it needs and no more.
+permissions: {}
+
+# One release at a time, and one already under way is left to finish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Actions are pinned to a commit here, unlike in ci.yml, because this workflow
+# can publish.
+jobs:
+  select-mode:
+    name: Decide what to do
+    # A run started by hand from another branch does nothing.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.select-mode.outputs.mode }}
+      publish-plan-artifact-id: ${{ steps.select-mode.outputs.publish-plan-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+
+      - run: npm ci
+
+      - id: select-mode
+        uses: changesets/action/select-mode@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+
+  version:
+    name: Open the Version Packages pull request
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # to push the branch with the new versions
+      pull-requests: write # to open the pull request
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+
+      - run: npm ci
+
+      - uses: changesets/action/version@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          # Not `changeset version` alone: that leaves package-lock.json
+          # behind, and `npm ci` then refuses it.
+          script: npm run version-packages
+
+  pack:
+    name: Check and pack
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      pack-dir-artifact-id: ${{ steps.pack.outputs.pack-dir-artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+
+      - run: npm ci
+
+      # This workflow does not wait for ci.yml, so nothing is staged from a
+      # commit that fails these.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: .github/scripts/check-tarballs.sh
+
+      - id: pack
+        uses: changesets/action/pack@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        with:
+          publish-plan-artifact-id: ${{ needs.select-mode.outputs.publish-plan-artifact-id }}
+
+  stage:
+    name: Stage on npm
+    needs: pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # what npm's trusted publishing reads; there is no npm token
+    steps:
+      # The repo is not checked out and nothing is installed: the only code
+      # that runs with the permission above is npm and the script below.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Staging needs npm 11.15 or later, which this Node brings.
+          node-version: 26
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.pack.outputs.pack-dir-artifact-id }}
+          path: ${{ runner.temp }}/packed
+
+      # Changesets cannot stage, so its plan is read here: the packages in the
+      # order they depend on each other, each with its tarball.
+      - name: Stage each package
+        shell: bash
+        env:
+          PACKED: ${{ runner.temp }}/packed
+        run: |
+          plan=$(find "$PACKED" -name publish-plan.json)
+          dir=$(dirname "$plan")
+
+          jq -r '.plan[][] | select(.kind == "publish") | [.name, .version, .access, .tag, .tarball.path] | @tsv' "$plan" |
+            while IFS=$'\t' read -r name version access tag tarball; do
+              # A trusted publisher is set on a package that exists, so a
+              # package's first version is published by hand.
+              if ! seen=$(npm view "$name" name 2>&1 < /dev/null); then
+                if grep -q E404 <<< "$seen"; then
+                  echo "::notice title=Not staged: $name@$version::$name is not on npm yet. Publish its first version by hand, add a trusted publisher for it on npmjs.com that names release.yml, then run this workflow again."
+                  continue
+                fi
+                echo "$seen"
+                exit 1
+              fi
+
+              npm stage publish "$dir/$tarball" --access "$access" --tag "$tag" --provenance < /dev/null
+              echo "::notice title=Staged: $name@$version::Approve or reject it on npmjs.com, under the package's Staged Packages tab."
+            done
