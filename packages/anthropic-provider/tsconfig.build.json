@@ -1,0 +1,22 @@
+{
+  // Builds what is published: `dist/anthropic.js` and `dist/anthropic.d.ts`.
+  // The tests are left out. Core is still read as source, as in
+  // `tsconfig.json`, so this build does not need core's to have run; only
+  // this package's file is written.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    // What is published runs wherever ES2022 does: the source needs nothing
+    // newer, and the build fails if that stops being so.
+    "target": "es2022",
+    // A relative `.ts` import can be rewritten to `.js` in the JavaScript,
+    // but the declarations keep it as written, and would then name a file
+    // that is not published. So one is refused here, for as long as the
+    // package is one file.
+    "allowImportingTsExtensions": false
+  },
+  "include": ["anthropic.ts"]
+}

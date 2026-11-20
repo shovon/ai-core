@@ -38,3 +38,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+
+      # Last, so that everything above is known to pass with nothing built:
+      # the workspace reads the packages as source.
+      - run: npm run build

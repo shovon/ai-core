@@ -3,6 +3,11 @@ import { builtinModules } from 'node:module';
 
 // https://vitejs.dev/config
 export default defineConfig({
+  // The library's packages are read as source, not as their builds, so an
+  // edit to one needs no build to reach the app: see `exports` in their
+  // package.json.
+  // Forge's own conditions for the main process are kept; this adds one.
+  resolve: { conditions: ['@ai-idioms/source'] },
   build: {
     lib: {
       entry: 'src/main/index.ts',

@@ -4,6 +4,9 @@ node_modules/
 # API keys
 .env
 
+# Built packages
+dist/
+
 # Vite and Electron Forge output
 .vite/
 out/

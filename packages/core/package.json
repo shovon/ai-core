@@ -4,9 +4,21 @@
   "description": "Plain values and functions for talking to a model: parts, messages, one provider port, and the pieces of a tool loop.",
   "private": true,
   "type": "module",
-  "main": "./core.ts",
-  "exports": "./core.ts",
+  "types": "./dist/core.d.ts",
+  "//": "Inside this workspace the package is run as source, through the `@ai-idioms/source` condition, so nothing here needs a build. What is published is `dist/`, built by `prepack`.",
+  "exports": {
+    ".": {
+      "@ai-idioms/source": "./core.ts",
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "node --eval \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "test": "node --test \"*.test.mts\"",
     "typecheck": "tsc"
   },

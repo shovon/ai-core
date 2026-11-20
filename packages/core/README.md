@@ -4,7 +4,9 @@ Plain values and functions for talking to a model. A conversation is an array yo
 
 ## Setup
 
-The packages are TypeScript source with no build step, so run them with a Node that executes TypeScript directly, or through a bundler. Inside this workspace, add them to a package's dependencies as `"*"`.
+The packages are not on npm yet. Inside this workspace, add them to a package's dependencies as `"*"`.
+
+A package in the workspace can read them as TypeScript source, with nothing to build, by naming the `@ai-idioms/source` condition: `node -C @ai-idioms/source`, `customConditions` in a tsconfig, or `resolve.conditions` in Vite. Without the condition they are read from `dist/`, which `npm run build` at the repo's root makes.
 
 A provider is a package of its own. Anthropic's is `@ai-idioms/anthropic-provider`. You install the vendor's SDK yourself and hand the provider a client.
 
