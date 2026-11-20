@@ -32,7 +32,7 @@ const provider = (request: Omit<AnthropicRequest, "settings">) =>
   claude({ ...request, settings: { anthropic: opus } });
 ```
 
-The examples below call this `provider`. The settings are anything Anthropic's `messages.stream` accepts, except `messages` and `system`, which are the request's own, and the tools you define, which are the request's `tools`. See [Settings](#settings).
+The examples below call this `provider`. The settings are anything Anthropic's `beta.messages.stream` accepts, except `messages` and `system`, which are the request's own, and the tools you define, which are the request's `tools`. See [Settings](#settings).
 
 ## Ask once
 
@@ -549,7 +549,8 @@ const answer = await text(
 );
 ```
 
-- With Anthropic the entry is everything `messages.stream` accepts besides `messages` and `system`. It needs `model` and `max_tokens`. Among the rest are `output_config`, `stop_sequences`, `tool_choice` and `thinking`, and `tools` for the tools Anthropic defines (see [Anthropic's own tools](#anthropics-own-tools)). It is the SDK's own type, so a setting Anthropic adds later needs nothing but a newer SDK.
+- With Anthropic the entry is everything `beta.messages.stream` accepts besides `messages` and `system`. It needs `model` and `max_tokens`. Among the rest are `output_config`, `stop_sequences`, `tool_choice` and `thinking`, and `tools` for the tools Anthropic defines (see [Anthropic's own tools](#anthropics-own-tools)). It is the SDK's own type, so a setting Anthropic adds later needs nothing but a newer SDK.
+- What only one of Anthropic's betas takes goes there too, such as `mcp_servers`, with the beta named in `betas`. The [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#betas) shows how.
 - The entry is sent as it is. The provider keeps nothing from one request to the next.
 - A request with no entry for Anthropic is refused before anything is sent: there is no model to send it to.
 - What the request is comes from the request: `messages` and `system` cannot be set there, and neither can a tool you define. A `shape` on the request is used in place of a `format` in `output_config`.
@@ -720,4 +721,3 @@ const collect = collecting(withAudio);
 - Nothing that fills in a provider's settings. They are plain data on the request, and a function of your own shares them.
 - No structured output from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
 - Anthropic's computer and browser toolsets. The settings take them, but a call does not keep the toolset it belongs to, and a result cannot hold the browser's state. Neither has been tried against Anthropic's API.
-- Tools on Anthropic's beta endpoint, such as the MCP connector.

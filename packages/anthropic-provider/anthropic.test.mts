@@ -1078,6 +1078,8 @@ test("stop reasons: a paused turn is 'pause', one this version does not know is 
     return turn?.from === "model" && turn.end;
   };
   assert.equal(await ending("pause_turn"), "pause");
+  // A summary asked for by a compaction request is no answer.
+  assert.equal(await ending("compaction"), "unknown");
   assert.equal(await ending("some_future_reason"), "unknown");
   assert.equal(await ending("toString"), "unknown");
   assert.deepEqual(
@@ -2661,7 +2663,7 @@ test("the provider is its two halves put together: it asks what `params` makes, 
       anthropic(client(whole, reply))(asksWeather),
     );
     const readBack = await Array.fromAsync(
-      read(client(halves, reply).messages.stream(params(asksWeather))),
+      read(client(halves, reply).beta.messages.stream(params(asksWeather))),
     );
     assert.deepEqual(readBack, yielded);
     assert.deepEqual(halves, whole);
@@ -2683,7 +2685,7 @@ test("the provider sends nothing until its stream is first read; the SDK sends w
 
   // The SDK's stream, made and never read, has asked all the same.
   const asked: any[] = [];
-  const made = client(asked, says("Hi.")).messages.stream(params(asksWeather));
+  const made = client(asked, says("Hi.")).beta.messages.stream(params(asksWeather));
   await made.finalMessage();
   assert.equal(asked.length, 1);
 });
@@ -2702,7 +2704,7 @@ test("a caller who makes the call reaches what the provider does not pass on: ev
       });
     },
   });
-  const stream = sdk.messages.stream(params(asksWeather), {
+  const stream = sdk.beta.messages.stream(params(asksWeather), {
     headers: { "x-trace": "t1" },
   });
   const events: string[] = [];
@@ -2747,9 +2749,11 @@ const rateLimits = (headers: Headers | undefined) =>
       name.startsWith("anthropic-ratelimit-"),
     ),
   );
-const keepingHeaders = (client: Anthropic) =>
-  async function* (request: AnthropicRequest) {
-    const stream = client.messages.stream(params(request), {
+const keepingHeaders = (
+  client: Anthropic,
+): Takes<AnthropicRequest, AnthropicOut> =>
+  async function* (request) {
+    const stream = client.beta.messages.stream(params(request), {
       signal: request.signal,
     });
     for await (const chunk of read(stream))
@@ -2820,10 +2824,13 @@ test("a provider of the caller's own, made from the two halves, keeps a response
 // The recipe in this package's README, as it is written there: a provider of
 // the caller's own, made from the two halves, that gives the SDK its options
 // for one request.
-const withOptions = (client: Anthropic, options: Anthropic.RequestOptions) =>
-  async function* (request: AnthropicRequest) {
+const withOptions = (
+  client: Anthropic,
+  options: Anthropic.RequestOptions,
+): Takes<AnthropicRequest, AnthropicOut> =>
+  async function* (request) {
     yield* read(
-      client.messages.stream(params(request), {
+      client.beta.messages.stream(params(request), {
         ...options,
         signal: request.signal,
       }),
@@ -2882,7 +2889,7 @@ const takingOptions = (
 ): Takes<RequestWithOptions, AnthropicOut> =>
   async function* (request) {
     yield* read(
-      client.messages.stream(params(request), {
+      client.beta.messages.stream(params(request), {
         ...request.options,
         signal: request.signal,
       }),
@@ -2948,4 +2955,259 @@ test("a provider of the caller's own takes the SDK's options from a field of its
     "Hi.",
   );
   await assert.rejects(text(claude({ ...request, signal: stopped.signal })));
+});
+
+// ── Betas ───────────────────────────────────────────────────────────────────
+// The provider calls the SDK's beta namespace. A request names a beta in its
+// settings, and what only that beta has is then in reach, with no cast.
+
+const connector = {
+  ...options,
+  betas: ["mcp-client-2026-09-15"],
+  mcp_servers: [{ type: "url", name: "docs", url: "https://example.com/mcp" }],
+  tools: [{ type: "mcp_toolset", mcp_server_name: "docs" }],
+} satisfies AnthropicSettings;
+
+test("a beta is named in the settings: the SDK sends it as a header, never in the body, and what the beta takes goes as it is", async () => {
+  const asked: { beta: string | null; body: any }[] = [];
+  const sdk = new Anthropic({
+    apiKey: "test",
+    fetch: async (_url, init) => {
+      asked.push({
+        beta: new Headers(init?.headers).get("anthropic-beta"),
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response(says("Hi."), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const claude = anthropic(sdk);
+  await text(
+    claude({
+      messages: [user("hi")],
+      tools: [weather],
+      settings: { anthropic: connector },
+    }),
+  );
+  assert.equal(asked[0]?.beta, "mcp-client-2026-09-15");
+  assert.equal("betas" in asked[0]!.body, false);
+  assert.deepEqual(asked[0]!.body.mcp_servers, connector.mcp_servers);
+  // The toolset is one of Anthropic's own: sent as it is, before the request's tools.
+  assert.deepEqual(asked[0]!.body.tools, [
+    { type: "mcp_toolset", mcp_server_name: "docs" },
+    {
+      name: "get_weather",
+      description: "Weather.",
+      input_schema: { type: "object" },
+    },
+  ]);
+
+  // A request that names no beta sends no such header.
+  await text(
+    claude({ messages: [user("hi")], settings: { anthropic: options } }),
+  );
+  assert.equal(asked[1]?.beta, null);
+});
+
+const listing = {
+  type: "mcp_tool_listing",
+  mcp_server_name: "docs",
+  tools: [
+    {
+      name: "search",
+      description: "Search the docs.",
+      input_schema: { type: "object" },
+    },
+  ],
+};
+const serverFound = {
+  type: "mcp_tool_result",
+  tool_use_id: "mcptoolu_1",
+  is_error: false,
+  content: [{ type: "text", text: "Three pages." }],
+};
+// An MCP call, its input written in pieces as a tool call's is.
+const callsServer = [
+  {
+    type: "content_block_start",
+    index: 1,
+    content_block: {
+      type: "mcp_tool_use",
+      id: "mcptoolu_1",
+      name: "search",
+      server_name: "docs",
+      input: {},
+    },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "input_json_delta", partial_json: '{"query":' },
+  },
+  {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "input_json_delta", partial_json: '"rain"}' },
+  },
+  { type: "content_block_stop", index: 1 },
+];
+const called = {
+  type: "mcp_tool_use",
+  id: "mcptoolu_1",
+  name: "search",
+  server_name: "docs",
+  input: { query: "rain" },
+};
+const serverAnswers = sse([
+  start,
+  ...whole(0, listing),
+  ...callsServer,
+  ...whole(2, serverFound),
+  ...speaks(3, "Three pages."),
+  ...finish("end_turn"),
+]);
+
+test("what an MCP server did arrives as native parts, each call with its whole input, and goes back as it came", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(sent, serverAnswers, serverAnswers, says("ok")),
+  );
+  const settings = { anthropic: connector };
+  const chunks: any[] = [];
+  for await (const chunk of claude({ messages: [user("rain?")], settings }))
+    chunks.push(chunk);
+  // The call's input is joined from its pieces. It is Anthropic's call, so
+  // none of it is told as a call still being written.
+  assert.deepEqual(chunks.slice(0, -1), [
+    { type: "native", provider: "anthropic", value: listing },
+    { type: "native", provider: "anthropic", value: called },
+    { type: "native", provider: "anthropic", value: serverFound },
+    { type: "text", text: "Three pages." },
+  ]);
+  assert.equal(chunks.some(isToolInput), false);
+
+  const messages: AnthropicMessage[] = [user("rain?")];
+  messages.push(...(await collect(claude({ messages, settings }))));
+  // Nothing in the turn is the caller's to run or to answer.
+  assert.deepEqual(pendingToolCalls(messages), []);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), messages);
+  messages.push(user("and snow?"));
+  await collect(claude({ messages, settings }));
+  assert.deepEqual(sent[2].messages[1], {
+    role: "assistant",
+    content: [
+      listing,
+      called,
+      serverFound,
+      { type: "text", text: "Three pages." },
+    ],
+  });
+});
+
+const summary = {
+  type: "compaction",
+  content: "The user's favourite number is 41.",
+  signature: "sig",
+};
+
+test("the reply to a compaction request is the summary alone: its turn ends as unknown, and it goes first in a new history", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(
+      sent,
+      sse([start, ...whole(0, summary), ...finish("compaction")]),
+      says("41"),
+    ),
+  );
+  const compacting = {
+    ...options,
+    betas: ["compact-2026-09-04"],
+    compaction: { type: "summarize" },
+  } satisfies AnthropicSettings;
+  // A turn's account of the response is typed in a history for Anthropic.
+  const reply: AnthropicMessage[] = [
+    ...(await collect(
+      claude({
+        messages: [user("My favourite number is 41.")],
+        settings: { anthropic: compacting },
+      }),
+    )),
+  ];
+  assert.deepEqual(sent[0].compaction, { type: "summarize" });
+  const [turn] = reply;
+  assert.ok(turn?.from === "model");
+  assert.deepEqual(turn.content, [
+    { type: "native", provider: "anthropic", value: summary },
+  ]);
+  // It is no answer. Which reason Anthropic gave is on the turn.
+  assert.equal(turn.end, "unknown");
+  assert.equal(turn.anthropic?.stop_reason, "compaction");
+
+  // The summary takes the place of the messages it stands for.
+  const messages: AnthropicMessage[] = [
+    ...reply,
+    user("What is my favourite number?"),
+  ];
+  const settings = { anthropic: { ...options, betas: ["compact-2026-09-04"] } };
+  assert.equal(await text(claude({ messages, settings })), "41");
+  assert.deepEqual(sent[1].messages, [
+    { role: "assistant", content: [summary] },
+    {
+      role: "user",
+      content: [{ type: "text", text: "What is my favourite number?" }],
+    },
+  ]);
+});
+
+test("what context management cleared, and each attempt a fallback made, are on the turn", async () => {
+  const cleared = {
+    applied_edits: [
+      {
+        type: "clear_tool_uses_20250919",
+        cleared_input_tokens: 5780,
+        cleared_tool_uses: 2,
+      },
+    ],
+  };
+  const iterations = [{ type: "message", input_tokens: 1, output_tokens: 5 }];
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(
+      sent,
+      sse([
+        start,
+        ...speaks(0, "Done."),
+        {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 5, iterations },
+          context_management: cleared,
+        },
+        { type: "message_stop" },
+      ]),
+    ),
+  );
+  const managing = {
+    ...options,
+    betas: ["context-management-2025-06-27"],
+    context_management: {
+      edits: [
+        {
+          type: "clear_tool_uses_20250919",
+          keep: { type: "tool_uses", value: 1 },
+        },
+      ],
+    },
+  } satisfies AnthropicSettings;
+  const reply: AnthropicMessage[] = [
+    ...(await collect(
+      claude({ messages: [user("hi")], settings: { anthropic: managing } }),
+    )),
+  ];
+  const [turn] = reply;
+  assert.deepEqual(sent[0].context_management, managing.context_management);
+  assert.ok(turn?.from === "model");
+  assert.deepEqual(turn.anthropic?.context_management, cleared);
+  assert.deepEqual(turn.anthropic?.usage.iterations, iterations);
 });
