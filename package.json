@@ -7,12 +7,15 @@
   "scripts": {
     "start": "npm start --workspace ai-agent-library-app",
     "build": "npm run build --workspaces --if-present",
+    "changeset": "changeset",
+    "version-packages": "changeset version && npm install --package-lock-only",
     "test": "npm test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "//": "typescript 6 is pinned here so it is the copy hoisted to the root: ESLint's TypeScript parser and its helpers need the compiler API, which TypeScript 7 no longer has. The library declares TypeScript 7 and gets its own copy.",
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "typescript": "~6.0.2"
   }
 }
