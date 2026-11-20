@@ -2,7 +2,7 @@
 
 A changeset is a small file in this folder. It says which published packages a change affects, how big the change is for each, and what to tell the people who use them. [Changesets](https://changesets.dev) turns the files into version numbers and changelogs.
 
-The published packages are `@ai-idioms/core` and `@ai-idioms/anthropic-provider`. A pull request that changes neither needs no changeset.
+The published packages are `@ai-patterns/core` and `@ai-patterns/anthropic-provider`. A pull request that changes neither needs no changeset.
 
 ## Add one
 
@@ -17,7 +17,7 @@ It asks which packages changed, how big each change is, and for a summary. The s
 The same without the questions:
 
 ```sh
-npx changeset add --patch @ai-idioms/core -m "Say what changed."
+npx changeset add --patch @ai-patterns/core -m "Say what changed."
 ```
 
 ## How big

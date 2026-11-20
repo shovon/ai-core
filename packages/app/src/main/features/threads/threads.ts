@@ -18,7 +18,7 @@ import {
   type ToolCall,
   type ToolResult,
   type ToolSpec,
-} from "@ai-idioms/core";
+} from "@ai-patterns/core";
 import { path, type Tree } from "@ai-agent-library/tree";
 import type {
   Item,

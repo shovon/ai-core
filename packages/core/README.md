@@ -1,4 +1,4 @@
-# @ai-idioms/core
+# @ai-patterns/core
 
 Plain values and functions for talking to a model. A conversation is an array you own, a provider is a function that streams a reply, and an agent is a `for` loop you write. Nothing here has dependencies, and nothing here needs the library to be read back: a history is plain JSON.
 
@@ -8,11 +8,11 @@ The packages are not on npm yet. Inside this workspace, add them to a package's 
 
 A package in the workspace can read them as TypeScript source, with nothing to build, by naming the `@ai-idioms/source` condition: `node -C @ai-idioms/source`, `customConditions` in a tsconfig, or `resolve.conditions` in Vite. Without the condition they are read from `dist/`, which `npm run build` at the repo's root makes.
 
-A provider is a package of its own. Anthropic's is `@ai-idioms/anthropic-provider`. You install the vendor's SDK yourself and hand the provider a client.
+A provider is a package of its own. Anthropic's is `@ai-patterns/anthropic-provider`. You install the vendor's SDK yourself and hand the provider a client.
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { anthropic, type AnthropicRequest, type AnthropicSettings } from "@ai-idioms/anthropic-provider";
+import { anthropic, type AnthropicRequest, type AnthropicSettings } from "@ai-patterns/anthropic-provider";
 
 const claude = anthropic(new Anthropic());
 ```
@@ -31,7 +31,7 @@ The examples below call this `provider`. The settings are anything Anthropic's `
 ## Ask once
 
 ```ts
-import { text, user } from "@ai-idioms/core";
+import { text, user } from "@ai-patterns/core";
 
 const answer = await text(provider({ messages: [user("Write a haiku about rain.")] }));
 ```
@@ -41,7 +41,7 @@ const answer = await text(provider({ messages: [user("Write a haiku about rain."
 A request can also carry standing instructions:
 
 ```ts
-import { text, user } from "@ai-idioms/core";
+import { text, user } from "@ai-patterns/core";
 
 const answer = await text(provider({ system: "Answer in French.", messages: [user("Hello.")] }));
 ```
@@ -51,7 +51,7 @@ const answer = await text(provider({ system: "Answer in French.", messages: [use
 A provider returns an async iterable. Text arrives in pieces; print each as it comes.
 
 ```ts
-import { isText, user } from "@ai-idioms/core";
+import { isText, user } from "@ai-patterns/core";
 
 for await (const chunk of provider({ messages: [user("Tell me a story.")] })) {
   if (isText(chunk)) process.stdout.write(chunk.text);
@@ -61,8 +61,8 @@ for await (const chunk of provider({ messages: [user("Tell me a story.")] })) {
 To show a reply while it grows, fold the chunks with `append`. It is pure: each call returns a new reply, and a turn still arriving has no `end` yet.
 
 ```ts
-import { append, user, type Reply } from "@ai-idioms/core";
-import type { AnthropicOut } from "@ai-idioms/anthropic-provider";
+import { append, user, type Reply } from "@ai-patterns/core";
+import type { AnthropicOut } from "@ai-patterns/anthropic-provider";
 
 let reply: Reply<AnthropicOut> = [];
 for await (const chunk of provider({ messages: [user("Tell me a story.")] })) {
@@ -76,7 +76,7 @@ for await (const chunk of provider({ messages: [user("Tell me a story.")] })) {
 A provider may also tell of a tool call while the model is still writing it. The input then arrives as `tool_input` parts, and `isToolInput` picks them out.
 
 ```ts
-import { isText, isToolInput, user } from "@ai-idioms/core";
+import { isText, isToolInput, user } from "@ai-patterns/core";
 
 for await (const chunk of provider({ messages: [user("What does package.json depend on?")], tools })) {
   if (isText(chunk)) process.stdout.write(chunk.text);
@@ -107,8 +107,8 @@ The history is an array of messages, and it is the whole state. To continue, add
 
 ```ts
 import { readFile, writeFile } from "node:fs/promises";
-import { collect, user } from "@ai-idioms/core";
-import type { AnthropicMessage } from "@ai-idioms/anthropic-provider";
+import { collect, user } from "@ai-patterns/core";
+import type { AnthropicMessage } from "@ai-patterns/anthropic-provider";
 
 const messages: AnthropicMessage[] = [user("My name is Ada.")];
 messages.push(...(await collect(provider({ messages }))));
@@ -127,7 +127,7 @@ A message is from `"user"`, `"model"` or `"tool"`, and who it is from decides wh
 To the library, a tool is plain data: a name, a description and a JSON Schema for its input. That is what the model is told. What a call does is your code. The library never runs a tool.
 
 ```ts
-import type { ToolSpec } from "@ai-idioms/core";
+import type { ToolSpec } from "@ai-patterns/core";
 
 const readFileTool = {
   name: "read_file",
@@ -161,8 +161,8 @@ import {
   user,
   type ToolCall,
   type ToolResult,
-} from "@ai-idioms/core";
-import type { AnthropicMessage } from "@ai-idioms/anthropic-provider";
+} from "@ai-patterns/core";
+import type { AnthropicMessage } from "@ai-patterns/anthropic-provider";
 
 // What each call does: a switch here, but a table of functions or a queue would do.
 const run = async (call: ToolCall) => {
@@ -262,7 +262,7 @@ const answer = async (call: ToolCall): Promise<ToolResult> => {
 To get the answer as JSON that fits a schema, which vendors call structured outputs, put the schema on the request as `shape`. It is plain data. The answer comes back as text: `JSON.parse` reads it, and `parse(schema, value)`, the same function that reads a tool call's input, checks it and types it. The one schema is told to the model, types what `parse` returns, and is what the answer is checked against.
 
 ```ts
-import { parse, text, user } from "@ai-idioms/core";
+import { parse, text, user } from "@ai-patterns/core";
 
 const triage = {
   type: "object",
@@ -306,7 +306,7 @@ Nothing enforces that style. Each provider sends what its vendor takes and refus
 A tool call's input and an answer asked for in a shape both arrive as the text of a JSON document, a piece at a time. `partial` reads what the text holds so far, where `JSON.parse` would throw until the last piece.
 
 ```ts
-import { isText, partial, user } from "@ai-idioms/core";
+import { isText, partial, user } from "@ai-patterns/core";
 
 let written = "";
 for await (const chunk of provider({ messages: [user(email)], shape: { schema: triage } })) {
@@ -320,7 +320,7 @@ const ticket = parse(triage, JSON.parse(written));
 For a tool call, fold the stream with `append` and read the one `tool_input` part as it grows:
 
 ```ts
-import { append, isToolInput, partial, type Reply } from "@ai-idioms/core";
+import { append, isToolInput, partial, type Reply } from "@ai-patterns/core";
 
 let reply: Reply<AnthropicOut> = [];
 for await (const chunk of provider({ messages, tools })) {
@@ -343,7 +343,7 @@ for await (const chunk of provider({ messages, tools })) {
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { file, text, user } from "@ai-idioms/core";
+import { file, text, user } from "@ai-patterns/core";
 
 const seen = await text(provider({ messages: [user("What is in this picture?", file("image/png", await readFile("cat.png")))] }));
 ```
@@ -357,7 +357,7 @@ A file may carry Anthropic's own settings for it, in a field under Anthropic's n
 A file given by link is fetched by the vendor, not by you. That fails when the link is private, local or needs credentials, and some files cannot be given by link at all: Anthropic takes a text file only as its text. The library does no fetching. Fetch the file yourself and give its bytes:
 
 ```ts
-import { file, user, type FilePart, type TextPart, type UserMessage } from "@ai-idioms/core";
+import { file, user, type FilePart, type TextPart, type UserMessage } from "@ai-patterns/core";
 
 // A linked file as its bytes. Everything else about the part is kept, a hint included.
 const fetched = async (part: FilePart & { url: string }, get: typeof fetch): Promise<FilePart> => {
@@ -400,8 +400,8 @@ With Anthropic, a document is cited only if it was sent with citations switched 
 
 ```ts
 import { readFile } from "node:fs/promises";
-import { collect, file, isSource, isText, user } from "@ai-idioms/core";
-import type { AnthropicMessage } from "@ai-idioms/anthropic-provider";
+import { collect, file, isSource, isText, user } from "@ai-patterns/core";
+import type { AnthropicMessage } from "@ai-patterns/anthropic-provider";
 
 const report = {
   ...file("application/pdf", await readFile("report.pdf")),
@@ -510,7 +510,7 @@ For automatic caching, put `cache_control: { type: "ephemeral" }` in Anthropic's
 A tool may carry Anthropic's own settings for it, in a field under Anthropic's name.
 
 ```ts
-import type { AnthropicTool } from "@ai-idioms/anthropic-provider";
+import type { AnthropicTool } from "@ai-patterns/anthropic-provider";
 
 const readFileTool = {
   name: "read_file",
@@ -584,7 +584,7 @@ const withEffort = (effort: "low" | "medium" | "high") => (request: Omit<Anthrop
 Anthropic defines tools of its own: web search, web fetch, code execution and tool search, which it runs, and bash, the text editor and memory, which you run. They go in Anthropic's settings, as `tools`.
 
 ```ts
-import type { AnthropicMessage, AnthropicSettings } from "@ai-idioms/anthropic-provider";
+import type { AnthropicMessage, AnthropicSettings } from "@ai-patterns/anthropic-provider";
 
 const searching = {
   model: "claude-opus-5-5",
@@ -628,7 +628,7 @@ The computer and browser toolsets can be put in the settings too, but they are n
 A provider is one function: it takes a request and returns an async iterable of parts, with one `end` chunk closing each turn. That is all a fake for a test needs.
 
 ```ts
-import { text, user, type AnyMessage, type Provider, type TextPart } from "@ai-idioms/core";
+import { text, user, type AnyMessage, type Provider, type TextPart } from "@ai-patterns/core";
 
 const canned: Provider<AnyMessage, TextPart> = async function* () {
   yield { type: "text", text: "Hello." };
@@ -665,7 +665,7 @@ For a real one:
 Code that only needs text can ask for the narrowest provider, and any richer one fits:
 
 ```ts
-import { text, user, type Part, type Provider, type TextPart, type UserMessage } from "@ai-idioms/core";
+import { text, user, type Part, type Provider, type TextPart, type UserMessage } from "@ai-patterns/core";
 
 const summarise = (provider: Provider<UserMessage<TextPart>, Part>) => (document: string) =>
   text(provider({ messages: [user(`Summarise: ${document}`)] }));
@@ -679,7 +679,7 @@ const summarise = (provider: Provider<UserMessage<TextPart>, Part>) => (document
 - `appending(rule)` is `append` with a rule of yours, and `collecting(rule)` is `collect` with it.
 
 ```ts
-import { appending, collecting, join, type Join, type Part, type TextPart } from "@ai-idioms/core";
+import { appending, collecting, join, type Join, type Part, type TextPart } from "@ai-patterns/core";
 
 // Audio, a piece at a time. Each piece is the base64 of its own bytes, so
 // pieces are kept side by side and never joined as strings.

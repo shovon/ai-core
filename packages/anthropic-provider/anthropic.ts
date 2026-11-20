@@ -23,7 +23,7 @@ import {
   type ToolSpec,
   type Usage,
   type UserMessage,
-} from "@ai-idioms/core";
+} from "@ai-patterns/core";
 
 // Anthropic's own blocks (thinking, server-tool results, ...) travel as native
 // parts under this provider's name, so no other provider mistakes them for its own.
