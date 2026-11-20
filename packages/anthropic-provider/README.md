@@ -15,6 +15,83 @@ const claude = anthropic(new Anthropic());
 
 How to use it is in the library's README, for now: [settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#settings), [files](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#files), [sources](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#sources), [caching](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#caching-with-anthropic), [tool settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#tool-settings-for-anthropic) and [Anthropic's own tools](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#anthropics-own-tools). What follows is said only here.
 
+## Betas
+
+The provider calls the SDK's beta namespace, `client.beta.messages.stream`. A request that names no beta is answered as it is on the stable one. To reach what only a beta has, name the beta in the settings, as `betas`, beside the settings it brings.
+
+Here Anthropic calls the tools of an MCP server itself:
+
+```ts
+import { collect, user } from "@ai-patterns/core";
+import type { AnthropicMessage, AnthropicSettings } from "@ai-patterns/anthropic-provider";
+
+const withDocs = {
+  model: "claude-opus-5-5",
+  max_tokens: 64000,
+  betas: ["mcp-client-2026-09-15"],
+  mcp_servers: [{ type: "url", name: "docs", url: "https://example.com/mcp" }],
+  tools: [{ type: "mcp_toolset", mcp_server_name: "docs" }],
+} satisfies AnthropicSettings;
+
+const messages: AnthropicMessage[] = [user("What do the docs say about rain?")];
+for (;;) {
+  messages.push(...(await collect(claude({ messages, settings: { anthropic: withDocs } }))));
+  const last = messages.at(-1);
+  if (last?.from === "model" && last.end === "pause") continue;
+  break;
+}
+```
+
+- `betas` is the SDK's own setting. The SDK sends the names as a header, never in the body.
+- A beta's name is the one Anthropic's documentation gives it. A setting sent without its beta is refused by Anthropic's API.
+- The settings are the SDK's own type for the beta namespace. So what a beta takes is typed, and a beta Anthropic adds later needs nothing but a newer SDK.
+- What a beta puts in a reply arrives as `native` parts, in the order it happened, and goes back to Anthropic as it came.
+
+### The MCP connector
+
+- A server's tools are listed, called and answered on Anthropic's side. The listing, each call and what came of it are `native` parts. They are not yours to run: `pendingToolCalls` does not return them.
+- A history in which a server was used can be sent to Anthropic only with that server still in the settings and the beta named. The listing in the turn names its server.
+- A server's entry may hold an `authorization_token`. Settings are plain data, so a request that is stored holds the token.
+- A toolset has no name of its own. So where a tool of yours has the name of one of a server's tools, both are sent. What Anthropic makes of that has not been tried.
+
+### Compaction
+
+A request with `compaction` in its settings asks for a summary of the conversation, and for nothing else.
+
+```ts
+const opus = { model: "claude-opus-5-5", max_tokens: 64000 } satisfies AnthropicSettings;
+const compact = ["compact-2026-09-04"];
+const summarising = { ...opus, betas: compact, compaction: { type: "summarize" } } satisfies AnthropicSettings;
+
+// The summary takes the place of the messages it stands for.
+const summary = await collect(claude({ messages, settings: { anthropic: summarising } }));
+const next: AnthropicMessage[] = [...summary, user("Where were we?")];
+next.push(...(await collect(claude({ messages: next, settings: { anthropic: { ...opus, betas: compact } } }))));
+```
+
+- The reply is one turn that holds the summary, as a `native` part. It is no answer, so the turn ends as `unknown` and `text` throws on it. `turn.anthropic?.stop_reason` says `"compaction"`.
+- A history that starts with a summary can be sent to Anthropic only with the beta named.
+
+### Context management
+
+- `context_management` clears old tool results on Anthropic's side, for one request. Your history is yours and does not change.
+- What was cleared is on the turn, as `turn.anthropic?.context_management`.
+
+### Threads
+
+- With `thread: { type: "create" }` in the settings, Anthropic holds the conversation.
+- The next request sends only its new messages, with `thread: { type: "continue", previous_message_id }`. The id is the last turn's `id`.
+
+### Fallbacks
+
+- `fallbacks` names the models to try when the one asked declines. Not every model takes them, and which models one may fall back to is on Anthropic's Models API.
+- What each attempt cost is on the turn, in `turn.anthropic?.usage.iterations`.
+- Anthropic's guide says a fallback that happened is told by a block in the reply, which would arrive as a `native` part. That has not been tried: it needs a real refusal.
+
+### What has been tried
+
+All of the above was tried against Anthropic's API on 2026-11-20, but for two things: a fallback that happened, and an MCP server that needs a token.
+
 ## Make the call yourself
 
 The Anthropic provider is two functions put together, and both are exported. `params` makes what Anthropic's SDK is asked from a request. `read` makes the library's parts from the SDK's stream.
@@ -23,7 +100,7 @@ The Anthropic provider is two functions put together, and both are exported. `pa
 import { params, read } from "@ai-patterns/anthropic-provider";
 
 // What `anthropic(client)` does with a request, once its stream is first read:
-const parts = read(client.messages.stream(params(request), { signal: request.signal }));
+const parts = read(client.beta.messages.stream(params(request), { signal: request.signal }));
 ```
 
 The provider does not pass on everything Anthropic says. To reach the rest, make the call and keep hold of the SDK's stream:
@@ -32,13 +109,13 @@ The provider does not pass on everything Anthropic says. To reach the rest, make
 import { append, type Reply } from "@ai-patterns/core";
 import { params, read, type AnthropicOut } from "@ai-patterns/anthropic-provider";
 
-const stream = client.messages.stream(params(request), { signal, timeout: 30_000 });
+const stream = client.beta.messages.stream(params(request), { signal, timeout: 30_000 });
 stream.on("streamEvent", (event) => {
   if (event.type === "message_start") console.log(event.message.id); // known before the first word
 });
 
 let reply: Reply<AnthropicOut> = [];
-for await (const chunk of read(stream)) reply = append(reply, chunk);
+for await (const chunk of read(stream)) reply = append<AnthropicOut>(reply, chunk);
 
 stream.response?.headers.get("anthropic-ratelimit-requests-remaining");
 ```
@@ -48,6 +125,7 @@ stream.response?.headers.get("anthropic-ratelimit-requests-remaining");
 - The second argument is the SDK's own options for one request: headers, a timeout, retries. A request's `signal` goes there too, since `params` leaves it out.
 - The SDK sends the request when the stream is made. The provider sends nothing until its own stream is first read.
 - `read` yields one turn, closed by one `end`, exactly as the provider does. It takes anything that has the stream's events, its `currentMessage`, its `finalMessage()` and its `request_id`.
+- Make the call on the SDK's beta namespace, as the provider does. The stable one's stream is not one `read` takes: it joins only the pieces of a reply it knows, so a block only a beta writes would come out of it incomplete.
 - This is code written against Anthropic's SDK. Code that is handed a provider cannot do it, because it never sees the client.
 
 ## Set a timeout or a header for one request
@@ -56,12 +134,12 @@ A timeout, a header and retries are the SDK's own options for one request. They 
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { text, user } from "@ai-patterns/core";
-import { params, read, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+import { text, user, type Takes } from "@ai-patterns/core";
+import { params, read, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
-const withOptions = (client: Anthropic, options: Anthropic.RequestOptions) =>
-  async function* (request: AnthropicRequest) {
-    yield* read(client.messages.stream(params(request), { ...options, signal: request.signal }));
+const withOptions = (client: Anthropic, options: Anthropic.RequestOptions): Takes<AnthropicRequest, AnthropicOut> =>
+  async function* (request) {
+    yield* read(client.beta.messages.stream(params(request), { ...options, signal: request.signal }));
   };
 
 const client = new Anthropic();
@@ -100,7 +178,7 @@ type RequestWithOptions = AnthropicRequest & { options?: Anthropic.RequestOption
 
 const takingOptions = (client: Anthropic): Takes<RequestWithOptions, AnthropicOut> =>
   async function* (request) {
-    yield* read(client.messages.stream(params(request), { ...request.options, signal: request.signal }));
+    yield* read(client.beta.messages.stream(params(request), { ...request.options, signal: request.signal }));
   };
 
 const claude = takingOptions(new Anthropic());
@@ -128,16 +206,16 @@ The provider does not keep a response's headers. A provider of your own that doe
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { isEnd } from "@ai-patterns/core";
-import { params, read, type AnthropicMessage, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+import { isEnd, type Takes } from "@ai-patterns/core";
+import { params, read, type AnthropicMessage, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
 // Which headers are kept is yours to say. Here: what Anthropic says of the rate limits.
 const rateLimits = (headers: Headers | undefined) =>
   Object.fromEntries([...(headers ?? [])].filter(([name]) => name.startsWith("anthropic-ratelimit-")));
 
-const keepingHeaders = (client: Anthropic) =>
-  async function* (request: AnthropicRequest) {
-    const stream = client.messages.stream(params(request), { signal: request.signal });
+const keepingHeaders = (client: Anthropic): Takes<AnthropicRequest, AnthropicOut> =>
+  async function* (request) {
+    const stream = client.beta.messages.stream(params(request), { signal: request.signal });
     for await (const chunk of read(stream))
       yield isEnd(chunk)
         ? { ...chunk, anthropic: { ...chunk.anthropic, headers: rateLimits(stream.response?.headers) } }

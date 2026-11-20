@@ -25,11 +25,29 @@ import {
   type UserMessage,
 } from "@ai-patterns/core";
 
+// The provider calls the SDK's beta namespace, and every SDK type here is that
+// namespace's own. A request that names no beta is answered as it is on the
+// stable one. One that names a beta, in its settings as `betas`, reaches what
+// only that beta has.
+//
+// It is this namespace's stream that keeps a reply whole. The stable one joins
+// only the pieces it knows: read from it, a call an MCP server ran arrives
+// with its input missing, and nothing is thrown.
+
+/**
+ * What Anthropic's SDK is asked: the body `client.beta.messages.stream` takes.
+ * It is the SDK's own type, so a field Anthropic adds later arrives with a
+ * newer SDK.
+ */
+export type AnthropicBody = Parameters<
+  Anthropic["beta"]["messages"]["stream"]
+>[0];
+
 // Anthropic's own blocks (thinking, server-tool results, ...) travel as native
 // parts under this provider's name, so no other provider mistakes them for its own.
 export type AnthropicBlock = Exclude<
-  Anthropic.ContentBlock,
-  Anthropic.TextBlock | Anthropic.ToolUseBlock
+  Anthropic.Beta.BetaContentBlock,
+  Anthropic.Beta.BetaTextBlock | Anthropic.Beta.BetaToolUseBlock
 >;
 export type AnthropicNative = NativePart<"anthropic", AnthropicBlock>;
 /**
@@ -37,7 +55,9 @@ export type AnthropicNative = NativePart<"anthropic", AnthropicBlock>;
  * name the citation as its API gave it, with the document, pages or
  * characters it points at.
  */
-export type AnthropicSource = SourcePart & { anthropic: Anthropic.TextCitation };
+export type AnthropicSource = SourcePart & {
+  anthropic: Anthropic.Beta.BetaTextCitation;
+};
 export type AnthropicOut =
   | TextPart
   | AnthropicSource
@@ -55,7 +75,7 @@ export type AnthropicOut =
 export type AnthropicHints = {
   anthropic?: {
     /** Cache the request up to and including this part. */
-    cache_control?: Anthropic.CacheControlEphemeral;
+    cache_control?: Anthropic.Beta.BetaCacheControlEphemeral;
   };
 };
 
@@ -69,7 +89,7 @@ export type AnthropicHints = {
  * tool result. Every other provider ignores the field and is given the same file.
  */
 export type AnthropicFileHints = {
-  anthropic?: Omit<Anthropic.DocumentBlockParam, "source" | "type">;
+  anthropic?: Omit<Anthropic.Beta.BetaRequestDocumentBlock, "source" | "type">;
 };
 
 /**
@@ -81,7 +101,7 @@ export type AnthropicFileHints = {
  * It is the API's own object, kept as it came, so whatever Anthropic adds to
  * a message arrives here with a newer SDK and nothing else.
  */
-export type AnthropicResponse = Omit<Anthropic.Message, "content"> & {
+export type AnthropicResponse = Omit<Anthropic.Beta.BetaMessage, "content"> & {
   /** The request's id, for Anthropic's support; null if the response did not carry one. */
   request_id: string | null;
 };
@@ -105,7 +125,7 @@ export type AnthropicMessage =
 type ModelPart =
   | ((TextPart | ToolCall) & AnthropicHints)
   | (FilePart & AnthropicFileHints)
-  | (SourcePart & { anthropic?: Anthropic.TextCitation })
+  | (SourcePart & { anthropic?: Anthropic.Beta.BetaTextCitation })
   | ReasoningPart
   | ToolInputPart
   | NativePart;
@@ -120,7 +140,7 @@ type ModelPart =
  */
 export type AnthropicToolHints = {
   anthropic?: Omit<
-    Anthropic.Tool,
+    Anthropic.Beta.BetaTool,
     "name" | "description" | "input_schema" | "type"
   >;
 };
@@ -133,7 +153,10 @@ export type AnthropicTool = ToolSpec & AnthropicToolHints;
  * editor and memory. It is every tool the SDK knows but one you define, so a
  * tool Anthropic adds later arrives with a newer SDK.
  */
-export type AnthropicOwnTool = Exclude<Anthropic.ToolUnion, Anthropic.Tool>;
+export type AnthropicOwnTool = Exclude<
+  Anthropic.Beta.BetaToolUnion,
+  Anthropic.Beta.BetaTool
+>;
 
 /**
  * Anthropic's own settings for a request: everything its API takes besides
@@ -142,13 +165,16 @@ export type AnthropicOwnTool = Exclude<Anthropic.ToolUnion, Anthropic.Tool>;
  * `thinking`, may be. It is the SDK's own type, so a setting Anthropic adds
  * later arrives with a newer SDK.
  *
+ * What only a beta takes goes here too, such as `mcp_servers`, with the beta
+ * named in `betas`. The SDK sends `betas` as a header, never in the body.
+ *
  * `tools` there holds the tools Anthropic defines, and only those. They are
  * sent as they are, before the request's own tools. A tool you define is the
  * request's own: it goes in the request's `tools`, and where it has the name
  * of one here, it is the one sent.
  */
 export type AnthropicSettings = Omit<
-  Anthropic.MessageStreamParams,
+  AnthropicBody,
   "messages" | "system" | "tools" | "stream"
 > & { tools?: readonly AnthropicOwnTool[] };
 
@@ -187,7 +213,7 @@ const source = (part: FilePart) => {
 };
 
 // Anthropic takes a text document as the text itself, never as base64 or by link.
-const plainText = (part: FilePart): Anthropic.PlainTextSource => {
+const plainText = (part: FilePart): Anthropic.Beta.BetaPlainTextSource => {
   const from = source(part);
   if (from.type === "url")
     throw new Error("anthropic: cannot send a text/plain file by link");
@@ -208,7 +234,9 @@ const plainText = (part: FilePart): Anthropic.PlainTextSource => {
 const fileBlock = (
   part: FilePart,
   settings?: AnthropicFileHints["anthropic"],
-): Anthropic.ImageBlockParam | Anthropic.DocumentBlockParam => {
+):
+  | Anthropic.Beta.BetaImageBlockParam
+  | Anthropic.Beta.BetaRequestDocumentBlock => {
   const { mediaType } = part;
   if (isImage(mediaType)) {
     const from = source(part);
@@ -278,7 +306,7 @@ const isOwn = (part: NativePart): part is AnthropicNative =>
  */
 const echoed = (
   part: Exclude<ModelPart, SourcePart>,
-): Anthropic.ContentBlockParam[] => {
+): Anthropic.Beta.BetaContentBlockParam[] => {
   switch (part.type) {
     // A file a model made, in another provider's turn: Claude writes none
     // into its own. It goes as a file does anywhere, and whether one may sit
@@ -317,8 +345,10 @@ const echoed = (
  * text the source says nothing of. Another provider's source is left out, and
  * so is one with no text before it.
  */
-const turn = (content: readonly ModelPart[]): Anthropic.ContentBlockParam[] =>
-  content.reduce<Anthropic.ContentBlockParam[]>((blocks, part) => {
+const turn = (
+  content: readonly ModelPart[],
+): Anthropic.Beta.BetaContentBlockParam[] =>
+  content.reduce<Anthropic.Beta.BetaContentBlockParam[]>((blocks, part) => {
     if (part.type !== "source") return [...blocks, ...echoed(part)];
     // The name is the only evidence a stored source offers about whose it is.
     const citation = part.anthropic;
@@ -343,7 +373,7 @@ const turn = (content: readonly ModelPart[]): Anthropic.ContentBlockParam[] =>
 
 const answered = (
   part: ToolResult & AnthropicHints,
-): Anthropic.ToolResultBlockParam => ({
+): Anthropic.Beta.BetaToolResultBlockParam => ({
   type: "tool_result",
   tool_use_id: part.id,
   is_error: part.error,
@@ -351,7 +381,11 @@ const answered = (
   cache_control: cache(part),
 });
 
-const message = (m: AnthropicMessage): Anthropic.MessageParam => {
+const message = (
+  m: AnthropicMessage,
+):
+  | Anthropic.Beta.BetaUserMessageParam
+  | Anthropic.Beta.BetaAssistantMessageParam => {
   switch (m.from) {
     case "user":
       return { role: "user", content: m.content.map(given) };
@@ -376,7 +410,7 @@ const message = (m: AnthropicMessage): Anthropic.MessageParam => {
  */
 const instructions = (system: AnthropicRequest["system"]) => {
   if (system === undefined || typeof system === "string") return system;
-  const blocks: Anthropic.TextBlockParam[] = [];
+  const blocks: Anthropic.Beta.BetaTextBlockParam[] = [];
   let text = "";
   for (const part of system) {
     if (part.type !== "text") throw unsendable(part);
@@ -522,15 +556,15 @@ const ownTools = (given: unknown): AnthropicOwnTool[] => {
 const toolsSent = (
   theirs: readonly AnthropicOwnTool[],
   yours: readonly AnthropicTool[] = [],
-): Anthropic.ToolUnion[] | undefined => {
+): Anthropic.Beta.BetaToolUnion[] | undefined => {
   const taken = new Set(yours.map((tool) => tool.name));
-  const sent: Anthropic.ToolUnion[] = [
+  const sent: Anthropic.Beta.BetaToolUnion[] = [
     ...theirs.filter((tool) => !("name" in tool && taken.has(tool.name))),
     ...yours.map(({ name, description, schema, anthropic }) => ({
       ...anthropic,
       name,
       description,
-      input_schema: schema as Anthropic.Tool.InputSchema,
+      input_schema: schema as Anthropic.Beta.BetaTool.InputSchema,
     })),
   ];
   return sent.length > 0 ? sent : undefined;
@@ -554,7 +588,7 @@ const outputConfig = (
           schema: fitSchema(
             shape.schema,
             fitted,
-          ) as Anthropic.JSONOutputFormat["schema"],
+          ) as Anthropic.Beta.BetaJSONOutputFormat["schema"],
         },
       }
     : config;
@@ -562,7 +596,7 @@ const outputConfig = (
 // Every stop reason the SDK knows, by name. When the SDK gains one, this stops
 // compiling until it is given a meaning. One the SDK does not know yet arrives
 // as "unknown", never as "stop".
-const reasons: Record<Anthropic.StopReason, Reason> = {
+const reasons: Record<Anthropic.Beta.BetaStopReason, Reason> = {
   end_turn: "stop",
   stop_sequence: "stop",
   tool_use: "stop",
@@ -570,16 +604,19 @@ const reasons: Record<Anthropic.StopReason, Reason> = {
   model_context_window_exceeded: "length",
   refusal: "refusal",
   pause_turn: "pause",
+  // The reply to a request to summarise a conversation. It holds the summary
+  // and no answer, and the library has no name for that.
+  compaction: "unknown",
 };
 const reason = (stop: string | null): Reason =>
   stop !== null && Object.hasOwn(reasons, stop)
-    ? reasons[stop as Anthropic.StopReason]
+    ? reasons[stop as Anthropic.Beta.BetaStopReason]
     : "unknown";
 
 // A citation as a source: what every provider can say of one, and Anthropic's
 // own citation under its name. `span` is the length of the text block it was on.
 const cited = (
-  citation: Anthropic.TextCitation,
+  citation: Anthropic.Beta.BetaTextCitation,
   span: number,
 ): AnthropicSource => {
   const title =
@@ -601,7 +638,7 @@ const plain = <T extends object>(value: T): T =>
 
 // Anthropic counts cached tokens apart from input_tokens; `input` here is all three.
 // Thinking is counted within output_tokens, and told apart only when Anthropic says how much it was.
-const spent = (usage: Anthropic.Usage): Usage => {
+const spent = (usage: Anthropic.Beta.BetaUsage): Usage => {
   const cacheRead = usage.cache_read_input_tokens ?? 0;
   const cacheWrite = usage.cache_creation_input_tokens ?? 0;
   const details = usage.output_tokens_details;
@@ -616,7 +653,7 @@ const spent = (usage: Anthropic.Usage): Usage => {
 
 /**
  * What Anthropic's SDK is asked, made from a request: the first half of the
- * provider. It is what `client.messages.stream` takes as its body.
+ * provider. It is what `client.beta.messages.stream` takes as its body.
  *
  * The settings are addressed to Anthropic by name, so they go as they are.
  * What the request is comes after, so nothing there can replace it. A request's
@@ -629,7 +666,7 @@ export const params = ({
   tools,
   shape,
   settings,
-}: AnthropicRequest): Anthropic.MessageStreamParams => {
+}: AnthropicRequest): AnthropicBody => {
   const { tools: theirs, ...own } = settingsOf(settings);
   return {
     ...own,
@@ -650,13 +687,21 @@ export const params = ({
 /**
  * What `read` needs of the SDK's stream: its events, the message as far as it
  * has come, the message once it is whole, and the id of the request. What
- * `client.messages.stream` returns is one, and so is anything else with these.
+ * `client.beta.messages.stream` returns is one, and so is anything else with
+ * these.
+ *
+ * The stable namespace's stream is not one: its events are another type. It
+ * joins only the pieces it knows, so a reply that holds a beta's block would
+ * come out of it incomplete.
  */
-export type AnthropicStream = AsyncIterable<Anthropic.MessageStreamEvent> & {
-  readonly currentMessage: Anthropic.Message | undefined;
-  finalMessage(): Promise<Anthropic.Message & { parsed_output?: unknown }>;
-  readonly request_id: string | null | undefined;
-};
+export type AnthropicStream =
+  AsyncIterable<Anthropic.Beta.BetaRawMessageStreamEvent> & {
+    readonly currentMessage: Anthropic.Beta.BetaMessage | undefined;
+    finalMessage(): Promise<
+      Anthropic.Beta.BetaMessage & { parsed_output?: unknown }
+    >;
+    readonly request_id: string | null | undefined;
+  };
 
 /**
  * The library's parts, read from the SDK's stream: the second half of the
@@ -763,6 +808,6 @@ export const anthropic = (
 ): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
     yield* read(
-      client.messages.stream(params(request), { signal: request.signal }),
+      client.beta.messages.stream(params(request), { signal: request.signal }),
     );
   };
