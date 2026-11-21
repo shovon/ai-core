@@ -4,6 +4,7 @@ import {
   answerToolCalls,
   fitSchema,
   fitToolIds,
+  isToolCall,
   toolResult,
   type End,
   type FilePart,
@@ -58,12 +59,24 @@ export type AnthropicNative = NativePart<"anthropic", AnthropicBlock>;
 export type AnthropicSource = SourcePart & {
   details: { anthropic: Anthropic.Beta.BetaTextCitation };
 };
+/**
+ * A call as Anthropic makes one: the shared fields, and in its `details`,
+ * under Anthropic's name, what Anthropic said of the call besides.
+ *
+ * A call to a member of a toolset, such as the computer's `screenshot`, names
+ * the toolset there. A toolset is one entry among the tools and has no name of
+ * its own, so this is all that ties the call to it. It goes back to Anthropic
+ * on the call and on the call's result. A call to any other tool has no entry.
+ */
+export type AnthropicToolCall = ToolCall & {
+  details?: { anthropic?: { toolset_name?: string } };
+};
 export type AnthropicOut =
   | TextPart
   | AnthropicSource
   | ReasoningPart
   | ToolInputPart
-  | ToolCall
+  | AnthropicToolCall
   | AnthropicNative;
 
 /**
@@ -77,6 +90,29 @@ export type AnthropicHints = {
     anthropic?: {
       /** Cache the request up to and including this part. */
       cache_control?: Anthropic.Beta.BetaCacheControlEphemeral;
+    };
+  };
+};
+
+/**
+ * Anthropic's own settings for a tool result, carried in the result's
+ * `settings`, under Anthropic's name.
+ *
+ * `browser_state` is the browser as a call to a member of the browser toolset
+ * left it: the open tabs, which one is active, and what the call changed. It
+ * is the SDK's own block without its `type`, and is sent after the result's
+ * other parts. Anthropic writes what the model reads from it. The result of
+ * `list_tabs`, `new_tab`, `switch_tab` or `close_tab` is the state and nothing
+ * else, so its `content` is empty.
+ *
+ * Every other provider ignores the entry and is given the result's content.
+ */
+export type AnthropicResultHints = {
+  settings?: {
+    anthropic?: {
+      /** Cache the request up to and including this result. */
+      cache_control?: Anthropic.Beta.BetaCacheControlEphemeral;
+      browser_state?: Omit<Anthropic.Beta.BetaBrowserStateBlockParam, "type">;
     };
   };
 };
@@ -127,13 +163,17 @@ export type AnthropicEnd = End & { details?: { anthropic: AnthropicResponse } };
  *
  * Any provider's sources are accepted in a model turn. Anthropic's own go back
  * as citations on the text they support; the rest are left out.
+ *
+ * A call may say, in its `details` under Anthropic's name, the toolset it
+ * belongs to. That goes back on the call and on its result. A result may
+ * carry, in its `settings`, the browser's state.
  */
 export type AnthropicMessage =
   | UserMessage<(TextPart & AnthropicHints) | (FilePart & AnthropicFileHints)>
   | (ModelMessage<ModelPart> & { details?: { anthropic?: AnthropicResponse } })
-  | { from: "tool"; content: readonly (ToolResult & AnthropicHints)[] };
+  | { from: "tool"; content: readonly (ToolResult & AnthropicResultHints)[] };
 type ModelPart =
-  | ((TextPart | ToolCall) & AnthropicHints)
+  | ((TextPart | AnthropicToolCall) & AnthropicHints)
   | (FilePart & AnthropicFileHints)
   | (SourcePart & {
       details?: { anthropic?: Anthropic.Beta.BetaTextCitation };
@@ -210,6 +250,9 @@ export type AnthropicRequest = Request<
 
 const unsendable = (part: Part) =>
   new Error(`anthropic: cannot send a "${part.type}" part`);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const images = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 const isImage = (mediaType: string): mediaType is (typeof images)[number] =>
@@ -315,6 +358,36 @@ const given = (
 const isOwn = (part: NativePart): part is AnthropicNative =>
   part.provider === "anthropic";
 
+// The toolset a call belongs to, as Anthropic said when it made the call. A
+// history may come from storage, written by anything, so it is read with care:
+// a name that is no string is no name.
+const toolsetOf = (call: ToolCall): string | undefined => {
+  const said = call.details?.anthropic;
+  return isRecord(said) && typeof said.toolset_name === "string"
+    ? said.toolset_name
+    : undefined;
+};
+
+/**
+ * The toolset of each call in a history that has one, by the call's id. A
+ * result holds the id of its call and no more, and Anthropic takes a toolset's
+ * name on a call and its result together or on neither. So a result's is read
+ * from its call, here, and the caller writes it nowhere.
+ */
+const toolsets = (
+  messages: readonly AnthropicMessage[],
+): ReadonlyMap<string, string> =>
+  new Map(
+    messages.flatMap((m) =>
+      m.from === "model"
+        ? m.content.filter(isToolCall).flatMap((call) => {
+            const toolset = toolsetOf(call);
+            return toolset === undefined ? [] : [[call.id, toolset] as const];
+          })
+        : [],
+    ),
+  );
+
 /**
  * A model-turn part as Anthropic takes it back, where that depends on the part
  * alone. Another provider's native part is left out. A source depends on the
@@ -344,6 +417,7 @@ const echoed = (
           id: part.id,
           name: part.name,
           input: part.input,
+          toolset_name: toolsetOf(part),
           cache_control: cache(part),
         },
       ];
@@ -387,18 +461,33 @@ const turn = (
     ];
   }, []);
 
+/**
+ * A tool result as Anthropic takes it. `toolset` is the toolset of the call it
+ * answers, if that call has one. The browser's state is addressed to Anthropic
+ * by name, so it goes as it is, after the result's other parts; what the block
+ * is comes after, so nothing there can replace it.
+ */
 const answered = (
-  part: ToolResult & AnthropicHints,
-): Anthropic.Beta.BetaToolResultBlockParam => ({
-  type: "tool_result",
-  tool_use_id: part.id,
-  is_error: part.error,
-  content: part.content.map(block),
-  cache_control: cache(part),
-});
+  part: ToolResult & AnthropicResultHints,
+  toolset: string | undefined,
+): Anthropic.Beta.BetaToolResultBlockParam => {
+  const state = part.settings?.anthropic?.browser_state;
+  return {
+    type: "tool_result",
+    tool_use_id: part.id,
+    toolset_name: toolset,
+    is_error: part.error,
+    content: [
+      ...part.content.map(block),
+      ...(state ? [{ ...state, type: "browser_state" } as const] : []),
+    ],
+    cache_control: cache(part),
+  };
+};
 
 const message = (
   m: AnthropicMessage,
+  toolsetOfCall: ReadonlyMap<string, string>,
 ):
   | Anthropic.Beta.BetaUserMessageParam
   | Anthropic.Beta.BetaAssistantMessageParam => {
@@ -408,7 +497,12 @@ const message = (
     case "model":
       return { role: "assistant", content: turn(m.content) };
     case "tool":
-      return { role: "user", content: m.content.map(answered) };
+      return {
+        role: "user",
+        content: m.content.map((part) =>
+          answered(part, toolsetOfCall.get(part.id)),
+        ),
+      };
     default:
       throw new Error(
         `anthropic: cannot send a message from "${(m as { from: string }).from}"`,
@@ -460,9 +554,6 @@ const unrun = (call: ToolCall) =>
 // narrower schema than the library does. The rules are from its structured
 // outputs guide. Two limits there are left to the API to report: 24 optional
 // properties and 16 properties with alternatives in one request.
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 
 // The bounds Anthropic does not enforce, each with what the model is told in its place.
 const bounds: Record<string, (limit: unknown) => string> = {
@@ -685,17 +776,20 @@ export const params = ({
   settings,
 }: AnthropicRequest): AnthropicBody => {
   const { tools: theirs, ...own } = settingsOf(settings);
+  const history = fitToolIds(
+    answerToolCalls(messages, unrun),
+    fitsAnthropic,
+    freshId,
+  );
+  // Read once the ids are the ones sent, so a result still finds its call.
+  const toolsetOfCall = toolsets(history);
   return {
     ...own,
     output_config: outputConfig(own.output_config, shape),
     system: instructions(system),
     // Anthropic has no empty turn; one can be left after foreign parts are dropped.
-    messages: fitToolIds(
-      answerToolCalls(messages, unrun),
-      fitsAnthropic,
-      freshId,
-    )
-      .map(message)
+    messages: history
+      .map((m) => message(m, toolsetOfCall))
       .filter((m) => m.content.length > 0),
     tools: toolsSent(ownTools(theirs), tools),
   };
@@ -781,12 +875,17 @@ export const read = async function* (
     }
     if (event.type === "content_block_stop") {
       const done = stream.currentMessage?.content[event.index];
+      // A call to a member of a toolset says which toolset, and it is kept:
+      // Anthropic takes it back on the call and on the call's result.
       if (done?.type === "tool_use")
         yield {
           type: "tool_call",
           id: done.id,
           name: done.name,
           input: done.input,
+          ...(done.toolset_name && {
+            details: { anthropic: { toolset_name: done.toolset_name } },
+          }),
         };
       // The passages a text block rests on are told once it is whole,
       // directly after its text, each saying how much text is its own.

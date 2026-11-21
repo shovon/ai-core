@@ -92,6 +92,90 @@ next.push(...(await collect(claude({ messages: next, settings: { anthropic: { ..
 
 All of the above was tried against Anthropic's API on 2026-11-20, but for two things: a fallback that happened, and an MCP server that needs a token.
 
+## The computer and browser toolsets
+
+A toolset is one entry among the settings' `tools` that stands for a family of tools you run. It has no name of its own, and it needs no beta.
+
+```ts
+import { collect, file, pendingToolCalls, toolResult, user, type ToolCall, type ToolResult } from "@ai-patterns/core";
+import type { AnthropicMessage, AnthropicSettings } from "@ai-patterns/anthropic-provider";
+
+const withScreen = {
+  model: "claude-opus-5-5",
+  max_tokens: 64000,
+  tools: [{ type: "computer_toolset_20260801" }],
+} satisfies AnthropicSettings;
+
+// Yours: do on a real screen what the call asks, and say what came of it.
+const act = async (call: ToolCall): Promise<ToolResult> =>
+  call.name === "screenshot" ? toolResult(call, [file("image/png", await screenshot())]) : toolResult(call, "OK");
+
+const messages: AnthropicMessage[] = [user("What is on the screen?")];
+for (;;) {
+  messages.push(...(await collect(claude({ messages, settings: { anthropic: withScreen } }))));
+  const calls = pendingToolCalls(messages);
+  if (calls.length === 0) break;
+  messages.push({ from: "tool", content: await Promise.all(calls.map(act)) });
+}
+```
+
+- A call to a member of a toolset is a `tool_call` like any other. Its name is the member's, such as `screenshot`, `left_click` or `navigate`. Run it and answer with `toolResult`.
+- The call says which toolset it belongs to, in its `details`. The provider sends that back on the call and on the call's result. You write it nowhere. It has to stay on the call in your history.
+- Typed as `AnthropicToolCall`, a call's toolset reads as `call.details?.anthropic?.toolset_name`. Both toolsets have a `screenshot` and a `left_click`, so with both in one request it is how you tell whose a call is.
+- A screenshot is a file in the result, like any tool's picture.
+- A turn may hold several calls. Answer each.
+- A call with no toolset in its `details` is sent with none, and so is its result. Anthropic takes the two as an ordinary tool's.
+
+### The browser's state
+
+The result of a call to a member of the browser toolset may carry the browser as the call left it. It goes in the result's `settings`, under Anthropic's name:
+
+```ts
+import type { AnthropicResultHints } from "@ai-patterns/anthropic-provider";
+
+const withBrowser = {
+  model: "claude-opus-5-5",
+  max_tokens: 64000,
+  tools: [{ type: "browser_toolset_20260801" }],
+} satisfies AnthropicSettings;
+
+// All the open tabs, and which one is active.
+const tabs = [
+  { tab_id: "t1", title: "Example Domain", url: "https://example.com/" },
+  { tab_id: "t2", title: "Notes", url: "https://example.org/notes", active: true },
+];
+
+const answer = (call: ToolCall): ToolResult & AnthropicResultHints => {
+  switch (call.name) {
+    // The state is the whole result.
+    case "list_tabs":
+    case "switch_tab":
+    case "close_tab":
+      return { ...toolResult(call, []), settings: { anthropic: { browser_state: { tabs } } } };
+    // And it says which tab the call opened.
+    case "new_tab": {
+      const state_changes = [{ type: "tab_opened" as const, tab_id: "t2" }];
+      return { ...toolResult(call, []), settings: { anthropic: { browser_state: { tabs, state_changes } } } };
+    }
+    // What the call gave, and the state after it.
+    default:
+      return { ...toolResult(call, "Done."), settings: { anthropic: { browser_state: { tabs } } } };
+  }
+};
+```
+
+- `browser_state` is the SDK's own block without its `type`: every open tab, which one is active, and in `state_changes` the tabs the call opened and what became of its downloads.
+- Anthropic writes what the model reads from it: the list of tabs, with the active one marked. The provider sends it after the result's other parts.
+- `list_tabs`, `new_tab`, `switch_tab` and `close_tab` take the state and nothing else, so the result's content is empty. Anthropic refuses text or a picture in one. The state of `new_tab` has exactly one `tab_opened` among its `state_changes`.
+- Every other member takes text or a picture, with the state or without.
+- A result that is an error takes text only, and Anthropic refuses the state in one. An error is how a member is answered when there is no state to give.
+- Anthropic refuses the state on the result of any other call, and of a call with no toolset in its `details`.
+- Every other provider ignores the entry and is given the result's content, which for those four members is empty.
+
+### What has been tried
+
+Both toolsets were tried against Anthropic's API on 2026-11-20, with `claude-opus-5-5`. Every call was answered with made-up results: no real screen or browser was driven. What each member's result takes was tried with calls written by hand.
+
 ## Make the call yourself
 
 The Anthropic provider is two functions put together, and both are exported. `params` makes what Anthropic's SDK is asked from a request. `read` makes the library's parts from the SDK's stream.
