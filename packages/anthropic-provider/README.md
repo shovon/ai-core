@@ -69,13 +69,13 @@ const next: AnthropicMessage[] = [...summary, user("Where were we?")];
 next.push(...(await collect(claude({ messages: next, settings: { anthropic: { ...opus, betas: compact } } }))));
 ```
 
-- The reply is one turn that holds the summary, as a `native` part. It is no answer, so the turn ends as `unknown` and `text` throws on it. `turn.anthropic?.stop_reason` says `"compaction"`.
+- The reply is one turn that holds the summary, as a `native` part. It is no answer, so the turn ends as `unknown` and `text` throws on it. `turn.details?.anthropic?.stop_reason` says `"compaction"`.
 - A history that starts with a summary can be sent to Anthropic only with the beta named.
 
 ### Context management
 
 - `context_management` clears old tool results on Anthropic's side, for one request. Your history is yours and does not change.
-- What was cleared is on the turn, as `turn.anthropic?.context_management`.
+- What was cleared is on the turn, as `turn.details?.anthropic?.context_management`.
 
 ### Threads
 
@@ -85,7 +85,7 @@ next.push(...(await collect(claude({ messages: next, settings: { anthropic: { ..
 ### Fallbacks
 
 - `fallbacks` names the models to try when the one asked declines. Not every model takes them, and which models one may fall back to is on Anthropic's Models API.
-- What each attempt cost is on the turn, in `turn.anthropic?.usage.iterations`.
+- What each attempt cost is on the turn, in `turn.details?.anthropic?.usage.iterations`.
 - Anthropic's guide says a fallback that happened is told by a block in the reply, which would arrive as a `native` part. That has not been tried: it needs a real refusal.
 
 ### What has been tried
@@ -218,7 +218,13 @@ const keepingHeaders = (client: Anthropic): Takes<AnthropicRequest, AnthropicOut
     const stream = client.beta.messages.stream(params(request), { signal: request.signal });
     for await (const chunk of read(stream))
       yield isEnd(chunk)
-        ? { ...chunk, anthropic: { ...chunk.anthropic, headers: rateLimits(stream.response?.headers) } }
+        ? {
+            ...chunk,
+            details: {
+              ...chunk.details,
+              anthropic: { ...chunk.details?.anthropic, headers: rateLimits(stream.response?.headers) },
+            },
+          }
         : chunk;
   };
 
@@ -230,17 +236,17 @@ To read them from a turn, say that your history may hold them:
 ```ts
 import { collect, user } from "@ai-patterns/core";
 
-type KeepingHeaders = AnthropicMessage & { anthropic?: { headers?: Record<string, string> } };
+type KeepingHeaders = AnthropicMessage & { details?: { anthropic?: { headers?: Record<string, string> } } };
 
 const settings = { anthropic: { model: "claude-opus-5-5", max_tokens: 64000 } };
 const messages: KeepingHeaders[] = [user("Hello.")];
 messages.push(...(await collect(claude({ messages, settings }))));
 
 const turn = messages.at(-1);
-if (turn?.from === "model") turn.anthropic?.headers?.["anthropic-ratelimit-requests-remaining"];
+if (turn?.from === "model") turn.details?.anthropic?.headers?.["anthropic-ratelimit-requests-remaining"];
 ```
 
-- `append` keeps whatever an `end` carries. So the headers are on the turn, beside the rest of Anthropic's account of the response, and in a stored history as plain JSON. They are never sent.
+- `append` keeps whatever an `end` carries. So the headers are in the turn's `details`, beside the rest of Anthropic's account of the response, and in a stored history as plain JSON. They are never sent.
 - It is a provider like the one it is made from. It fits wherever `anthropic(client)` does, and sends nothing until its stream is first read.
 - The headers come with the `end`, so a stream that is cut off leaves none on its turn. To read them sooner, hold the SDK's stream as in [Make the call yourself](#make-the-call-yourself).
 - Kept whole, the headers hold everything the response carries, such as Anthropic's id for your organisation, and all of it goes wherever the history goes. That is why the example names the ones it keeps.

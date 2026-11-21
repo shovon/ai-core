@@ -51,12 +51,12 @@ export type AnthropicBlock = Exclude<
 >;
 export type AnthropicNative = NativePart<"anthropic", AnthropicBlock>;
 /**
- * A source as Anthropic cites one: the shared fields, and under Anthropic's
- * name the citation as its API gave it, with the document, pages or
- * characters it points at.
+ * A source as Anthropic cites one: the shared fields, and in its `details`,
+ * under Anthropic's name, the citation as its API gave it, with the document,
+ * pages or characters it points at.
  */
 export type AnthropicSource = SourcePart & {
-  anthropic: Anthropic.Beta.BetaTextCitation;
+  details: { anthropic: Anthropic.Beta.BetaTextCitation };
 };
 export type AnthropicOut =
   | TextPart
@@ -67,29 +67,38 @@ export type AnthropicOut =
   | AnthropicNative;
 
 /**
- * Instructions for Anthropic alone, carried as an extra field on a shared
- * part. They change cost, never meaning, so every other provider ignores them.
- * Read on the parts of a message itself and on the parts of the system prompt,
- * not on parts inside a tool result.
+ * Instructions for Anthropic alone, carried in a shared part's `settings`,
+ * under Anthropic's name. They change cost, never meaning, so every other
+ * provider ignores them. Read on the parts of a message itself and on the
+ * parts of the system prompt, not on parts inside a tool result.
  */
 export type AnthropicHints = {
-  anthropic?: {
-    /** Cache the request up to and including this part. */
-    cache_control?: Anthropic.Beta.BetaCacheControlEphemeral;
+  settings?: {
+    anthropic?: {
+      /** Cache the request up to and including this part. */
+      cache_control?: Anthropic.Beta.BetaCacheControlEphemeral;
+    };
   };
 };
 
 /**
- * Anthropic's own settings for a file, carried as an extra field on it: every
- * one its API has for a document, such as `citations`, `title`, `context` and
- * `cache_control`. On a PDF or a text file they are sent as they are. An image
- * takes only `cache_control`, and the rest is not read on one.
+ * Anthropic's own settings for a file, carried in the file's `settings`, under
+ * Anthropic's name: every one its API has for a document, such as `citations`,
+ * `title`, `context` and `cache_control`. On a PDF or a text file they are
+ * sent as they are. An image takes only `cache_control`, and the rest is not
+ * read on one.
  *
- * Like any hint, it is read on a file in a message itself, not on one inside a
- * tool result. Every other provider ignores the field and is given the same file.
+ * Like any hint, they are read on a file in a message itself, not on one
+ * inside a tool result. Every other provider ignores the entry and is given
+ * the same file.
  */
 export type AnthropicFileHints = {
-  anthropic?: Omit<Anthropic.Beta.BetaRequestDocumentBlock, "source" | "type">;
+  settings?: {
+    anthropic?: Omit<
+      Anthropic.Beta.BetaRequestDocumentBlock,
+      "source" | "type"
+    >;
+  };
 };
 
 /**
@@ -105,44 +114,50 @@ export type AnthropicResponse = Omit<Anthropic.Beta.BetaMessage, "content"> & {
   /** The request's id, for Anthropic's support; null if the response did not carry one. */
   request_id: string | null;
 };
-/** The End of a turn from this provider: the shared End, and Anthropic's own account under its name. */
-export type AnthropicEnd = End & { anthropic?: AnthropicResponse };
+/** The End of a turn from this provider: the shared End, and in its `details`, under Anthropic's name, Anthropic's own account of the response. */
+export type AnthropicEnd = End & { details?: { anthropic: AnthropicResponse } };
 
 /**
  * Any portable history, optionally with hints. Any provider's native parts are
  * accepted in a model turn; only Anthropic's own are sent.
  *
- * A turn this provider made holds Anthropic's account of the response under
- * its name, where `append` put it. It is read here and never sent.
+ * A turn this provider made holds Anthropic's account of the response in its
+ * `details`, under Anthropic's name, where `append` put it. It is read here
+ * and never sent.
  *
  * Any provider's sources are accepted in a model turn. Anthropic's own go back
  * as citations on the text they support; the rest are left out.
  */
 export type AnthropicMessage =
   | UserMessage<(TextPart & AnthropicHints) | (FilePart & AnthropicFileHints)>
-  | (ModelMessage<ModelPart> & { anthropic?: AnthropicResponse })
+  | (ModelMessage<ModelPart> & { details?: { anthropic?: AnthropicResponse } })
   | { from: "tool"; content: readonly (ToolResult & AnthropicHints)[] };
 type ModelPart =
   | ((TextPart | ToolCall) & AnthropicHints)
   | (FilePart & AnthropicFileHints)
-  | (SourcePart & { anthropic?: Anthropic.Beta.BetaTextCitation })
+  | (SourcePart & {
+      details?: { anthropic?: Anthropic.Beta.BetaTextCitation };
+    })
   | ReasoningPart
   | ToolInputPart
   | NativePart;
 
 /**
- * Anthropic's own settings for a tool, carried as an extra field on it: every
+ * Anthropic's own settings for a tool, carried in the tool's `settings`,
+ * under Anthropic's name: every
  * one its API has for a tool you define, such as `cache_control`, `strict` and
  * `eager_input_streaming`. They are sent as they are. What the tool is, its
  * name, description and schema, is not among them and cannot be set here.
  *
- * Every other provider ignores the field and is told the same tool.
+ * Every other provider ignores the entry and is told the same tool.
  */
 export type AnthropicToolHints = {
-  anthropic?: Omit<
-    Anthropic.Beta.BetaTool,
-    "name" | "description" | "input_schema" | "type"
-  >;
+  settings?: {
+    anthropic?: Omit<
+      Anthropic.Beta.BetaTool,
+      "name" | "description" | "input_schema" | "type"
+    >;
+  };
 };
 /** A tool, optionally with Anthropic's settings for it. */
 export type AnthropicTool = ToolSpec & AnthropicToolHints;
@@ -233,7 +248,7 @@ const plainText = (part: FilePart): Anthropic.Beta.BetaPlainTextSource => {
  */
 const fileBlock = (
   part: FilePart,
-  settings?: AnthropicFileHints["anthropic"],
+  settings?: NonNullable<AnthropicFileHints["settings"]>["anthropic"],
 ):
   | Anthropic.Beta.BetaImageBlockParam
   | Anthropic.Beta.BetaRequestDocumentBlock => {
@@ -262,8 +277,9 @@ const fileBlock = (
 // One translator per origin, because each origin allows different parts.
 // A part none of them recognises is an error here, never forwarded to the API.
 
-/** The one hint read on a part that is not a file. Nothing else in the field is forwarded. */
-const cache = (part: AnthropicHints) => part.anthropic?.cache_control;
+/** The one hint read on a part that is not a file. Nothing else in the entry is forwarded. */
+const cache = (part: AnthropicHints) =>
+  part.settings?.anthropic?.cache_control;
 
 /** A part of a tool result. No hint is read here. */
 const block = (part: TextPart | FilePart) => {
@@ -289,7 +305,7 @@ const given = (
         cache_control: cache(part),
       } as const;
     case "file":
-      return fileBlock(part, part.anthropic);
+      return fileBlock(part, part.settings?.anthropic);
     default:
       throw unsendable(part);
   }
@@ -312,7 +328,7 @@ const echoed = (
     // into its own. It goes as a file does anywhere, and whether one may sit
     // in a model turn is Anthropic's to say.
     case "file":
-      return [fileBlock(part, part.anthropic)];
+      return [fileBlock(part, part.settings?.anthropic)];
     // Shown, never sent. The thinking block itself goes back as a native part.
     case "reasoning":
       return [];
@@ -351,7 +367,7 @@ const turn = (
   content.reduce<Anthropic.Beta.BetaContentBlockParam[]>((blocks, part) => {
     if (part.type !== "source") return [...blocks, ...echoed(part)];
     // The name is the only evidence a stored source offers about whose it is.
-    const citation = part.anthropic;
+    const citation = part.details?.anthropic;
     const last = blocks.at(-1);
     if (!citation || last?.type !== "text") return blocks;
     const before = blocks.slice(0, -1);
@@ -560,8 +576,8 @@ const toolsSent = (
   const taken = new Set(yours.map((tool) => tool.name));
   const sent: Anthropic.Beta.BetaToolUnion[] = [
     ...theirs.filter((tool) => !("name" in tool && taken.has(tool.name))),
-    ...yours.map(({ name, description, schema, anthropic }) => ({
-      ...anthropic,
+    ...yours.map(({ name, description, schema, settings }) => ({
+      ...settings?.anthropic,
       name,
       description,
       input_schema: schema as Anthropic.Beta.BetaTool.InputSchema,
@@ -614,7 +630,8 @@ const reason = (stop: string | null): Reason =>
     : "unknown";
 
 // A citation as a source: what every provider can say of one, and Anthropic's
-// own citation under its name. `span` is the length of the text block it was on.
+// own citation in its `details`, under Anthropic's name. `span` is the length
+// of the text block it was on.
 const cited = (
   citation: Anthropic.Beta.BetaTextCitation,
   span: number,
@@ -627,7 +644,7 @@ const cited = (
     quote: citation.cited_text,
     ...(title != null && { title }),
     ...("url" in citation && { url: citation.url }),
-    anthropic: citation,
+    details: { anthropic: citation },
   };
 };
 
@@ -790,7 +807,9 @@ export const read = async function* (
     usage: spent(ended.usage),
     id: ended.id,
     model: ended.model,
-    anthropic: plain({ ...ended, request_id: stream.request_id ?? null }),
+    details: {
+      anthropic: plain({ ...ended, request_id: stream.request_id ?? null }),
+    },
   };
   yield end;
 };
