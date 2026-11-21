@@ -2,9 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Anthropic from "@anthropic-ai/sdk";
 import {
+  AnthropicBedrock,
+  AnthropicBedrockMantle,
+} from "@anthropic-ai/bedrock-sdk";
+import { AnthropicFoundry } from "@anthropic-ai/foundry-sdk";
+import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
+import {
   anthropic,
   params,
   read,
+  type AnthropicClient,
   type AnthropicMessage,
   type AnthropicOut,
   type AnthropicOwnTool,
@@ -3086,7 +3093,7 @@ const rateLimits = (headers: Headers | undefined) =>
     ),
   );
 const keepingHeaders = (
-  client: Anthropic,
+  client: AnthropicClient,
 ): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
     const stream = client.beta.messages.stream(params(request), {
@@ -3164,7 +3171,7 @@ test("a provider of the caller's own, made from the two halves, keeps a response
 // the caller's own, made from the two halves, that gives the SDK its options
 // for one request.
 const withOptions = (
-  client: Anthropic,
+  client: AnthropicClient,
   options: Anthropic.RequestOptions,
 ): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
@@ -3224,7 +3231,7 @@ type RequestWithOptions = AnthropicRequest & {
   options?: Anthropic.RequestOptions;
 };
 const takingOptions = (
-  client: Anthropic,
+  client: AnthropicClient,
 ): Takes<RequestWithOptions, AnthropicOut> =>
   async function* (request) {
     yield* read(
@@ -3295,6 +3302,119 @@ test("a provider of the caller's own takes the SDK's options from a field of its
   );
   await assert.rejects(text(claude({ ...request, signal: stopped.signal })));
 });
+
+// ── The clients it takes ────────────────────────────────────────────────────
+// The provider asks a client for the one call it makes. So the SDK's clients
+// for Anthropic's clouds are taken as they are, though none is an `Anthropic`.
+
+/** Each of the SDK's cloud clients, with a made-up sign-in and `fetch` replaced. */
+const clouds = (fetch: typeof globalThis.fetch) => ({
+  bedrock: new AnthropicBedrock({
+    awsAccessKey: "test",
+    awsSecretKey: "test",
+    awsRegion: "us-east-1",
+    fetch,
+  }),
+  "bedrock mantle": new AnthropicBedrockMantle({
+    apiKey: "test",
+    awsRegion: "us-east-1",
+    fetch,
+  }),
+  vertex: new AnthropicVertex({
+    projectId: "example",
+    region: "us-east5",
+    // Stands in for a signed-in Google client, so none is looked for.
+    authClient: {
+      getRequestHeaders: async () => new Headers({ authorization: "Bearer test" }),
+    } as unknown as NonNullable<
+      NonNullable<ConstructorParameters<typeof AnthropicVertex>[0]>["authClient"]
+    >,
+    fetch,
+  }),
+  foundry: new AnthropicFoundry({ apiKey: "test", resource: "example", fetch }),
+});
+
+for (const name of ["bedrock", "bedrock mantle", "vertex", "foundry"] as const)
+  test(`the SDK's ${name} client is taken as it is: the request goes where that client sends it, and the reply is read whole`, async () => {
+    const asked: { url: string; beta: string | null; body: any }[] = [];
+    const cloud: AnthropicClient = clouds(async (url, init) => {
+      asked.push({
+        url: String(url),
+        beta: new Headers(init?.headers).get("anthropic-beta"),
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response(says("Hi."), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    })[name];
+    const reply: readonly AnthropicMessage[] = await collect(
+      anthropic(cloud)({
+        messages: [user("hi")],
+        settings: {
+          anthropic: { ...options, betas: ["context-management-2025-06-27"] },
+        },
+      }),
+    );
+    assert.equal(asked.length, 1);
+    assert.equal(new URL(asked[0]!.url).hostname, {
+      bedrock: "bedrock-runtime.us-east-1.amazonaws.com",
+      "bedrock mantle": "bedrock-mantle.us-east-1.api.aws",
+      vertex: "us-east5-aiplatform.googleapis.com",
+      foundry: "example.services.ai.azure.com",
+    }[name]);
+    assert.equal(asked[0]!.beta, "context-management-2025-06-27");
+    assert.deepEqual(asked[0]!.body.messages, [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ]);
+    const [turn] = reply;
+    assert.ok(turn?.from === "model");
+    assert.deepEqual(turn.content, [{ type: "text", text: "Hi." }]);
+    // What comes back is Anthropic's on every cloud, so it goes by that name.
+    assert.equal(turn.details?.anthropic?.id, "msg_1");
+  });
+
+test("a client of your own is one too: anything with the SDK's one call", async () => {
+  const sent: any[] = [];
+  const real = client(sent, says("Hi."));
+  const seen: unknown[] = [];
+  const watched: AnthropicClient = {
+    beta: {
+      messages: {
+        stream: (body, options) => {
+          seen.push(body.model);
+          return real.beta.messages.stream(body, options);
+        },
+      },
+    },
+  };
+  assert.equal(
+    await text(
+      anthropic(watched)({ messages: [user("hi")], settings: { anthropic: options } }),
+    ),
+    "Hi.",
+  );
+  assert.deepEqual(seen, ["claude-opus-5-5"]);
+});
+
+// Must compile: each client the SDK makes is one the provider takes. And must
+// not: the stable namespace's call is another, whose stream `read` cannot take.
+export const taken = (
+  own: Anthropic,
+  bedrock: AnthropicBedrock,
+  mantle: AnthropicBedrockMantle,
+  vertex: AnthropicVertex,
+  foundry: AnthropicFoundry,
+) => [
+  anthropic(own),
+  anthropic(bedrock),
+  anthropic(mantle),
+  anthropic(vertex),
+  anthropic(foundry),
+  // @ts-expect-error the beta namespace's call is the one that is made
+  anthropic({ beta: { messages: { stream: own.messages.stream } } }),
+  // @ts-expect-error and a client with no such call is not one
+  anthropic({ messages: own.messages }),
+];
 
 // ── Betas ───────────────────────────────────────────────────────────────────
 // The provider calls the SDK's beta namespace. A request names a beta in its
