@@ -629,7 +629,7 @@ Sending such a history later:
 - One in which tool search found a tool of yours cannot: Anthropic refuses it unless that tool is still in the request.
 - Code runs in a container that Anthropic keeps. Its id and when it expires are on the turn, as `turn.details?.anthropic?.container`. To use the same one again, files and all, put the id in the next request's settings as `container`.
 
-The computer and browser toolsets can be put in the settings too, but they are not supported yet: see [What is not here](#what-is-not-here).
+The computer and browser toolsets go in the settings too. A call to one of their members is yours to run, like bash. What their results take is in the [Anthropic provider's README](https://github.com/shovon/ai-core/blob/main/packages/anthropic-provider/README.md#the-computer-and-browser-toolsets).
 
 ## Write a provider
 
@@ -723,4 +723,3 @@ const collect = collecting(withAudio);
 - No retrieval, persistence or scheduling.
 - Nothing that fills in a provider's settings. They are plain data on the request, and a function of your own shares them.
 - No structured output from a vendor that cannot be asked for one. Write the schema into the prompt and call `parse` yourself.
-- Anthropic's computer and browser toolsets. The settings take them, but a call does not keep the toolset it belongs to, and a result cannot hold the browser's state. Neither has been tried against Anthropic's API.

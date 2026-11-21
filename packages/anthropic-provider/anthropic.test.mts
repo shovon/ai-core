@@ -2360,6 +2360,290 @@ test("a call to a tool of Anthropic's that the caller runs is a call like any ot
   ]);
 });
 
+// ── Toolsets ────────────────────────────────────────────────────────────────
+//
+// What is sent here is what Anthropic's API accepted on 2026-11-20, and what
+// the tests say it refuses is what it refused then.
+
+const computer = { type: "computer_toolset_20260801" } as const;
+const browser = { type: "browser_toolset_20260801" } as const;
+// A call to a toolset's member, as Anthropic streams one.
+const callsMember = (toolset_name: string, name: string, input: object) =>
+  sse([
+    start,
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "tool_use",
+        id: "toolu_1",
+        name,
+        toolset_name,
+        caller: { type: "direct" },
+        input: {},
+      },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+    },
+    { type: "content_block_stop", index: 0 },
+    ...finish("tool_use"),
+  ]);
+// The same call as a history holds it.
+const member = (toolset_name: string, name: string, id: string, input = {}) =>
+  ({
+    type: "tool_call",
+    id,
+    name,
+    input,
+    details: { anthropic: { toolset_name } },
+  }) as const;
+const tabs = [
+  { tab_id: "t1", title: "Example Domain", url: "https://example.com/", active: true },
+  { tab_id: "t2", title: "Notes", url: "https://example.org/notes" },
+];
+
+test("a call to a toolset's member keeps the toolset's name, and it goes back on the call and on its result", async () => {
+  const sent: any[] = [];
+  const claude = anthropic(
+    client(sent, callsMember("computer", "screenshot", {}), says("A blue square.")),
+  );
+  const settings = withTools(computer);
+  const messages: AnthropicMessage[] = [user("what is on the screen?")];
+  messages.push(...(await collect(claude({ messages, settings }))));
+  const calls = pendingToolCalls(messages);
+  assert.deepEqual(calls, [
+    {
+      type: "tool_call",
+      id: "toolu_1",
+      name: "screenshot",
+      input: {},
+      details: { anthropic: { toolset_name: "computer" } },
+    },
+  ]);
+  // The screenshot is a file in the result, as any tool's picture is.
+  const picture = file("image/png", new Uint8Array([137, 80, 78, 71]));
+  messages.push({
+    from: "tool",
+    content: calls.map((call) => toolResult(call, [picture])),
+  });
+  messages.push(...(await collect(claude({ messages, settings }))));
+  assert.deepEqual(sent[1].tools, [computer]);
+  assert.deepEqual(sent[1].messages.slice(1), [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_1",
+          name: "screenshot",
+          input: {},
+          toolset_name: "computer",
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "toolu_1",
+          toolset_name: "computer",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "iVBORw==" },
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+});
+
+test("a toolset's name is on a call and its result together, or on neither", async () => {
+  const sent: any[] = [];
+  // As a history comes back from storage: untyped. Anthropic refuses a name on
+  // one of the two alone, so a call with no name it can read sends none on either.
+  const stored: any[] = [
+    user("go"),
+    {
+      from: "model",
+      end: "stop",
+      content: [
+        member("computer", "left_click", "toolu_named"),
+        // Made before the name was kept, or by a tool of the caller's own.
+        { type: "tool_call", id: "toolu_plain", name: "left_click", input: {} },
+        // Not a name.
+        { ...member("computer", "left_click", "toolu_number"), details: { anthropic: { toolset_name: 5 } } },
+        { ...member("computer", "left_click", "toolu_bare"), details: { anthropic: "computer" } },
+        // Another provider's.
+        { ...member("computer", "left_click", "toolu_other"), details: { other: { toolset_name: "computer" } } },
+      ],
+    },
+    {
+      from: "tool",
+      content: ["toolu_named", "toolu_plain", "toolu_number", "toolu_bare", "toolu_other"].map(
+        // A name written on a result is not read: a result's is its call's.
+        (id) => ({ type: "tool_result", id, content: [], details: { anthropic: { toolset_name: "browser" } } }),
+      ),
+    },
+  ];
+  await collect(
+    anthropic(client(sent, says("ok")))({ messages: stored, settings: withTools(computer) }),
+  );
+  const [, turn, results] = sent[0].messages;
+  assert.deepEqual(
+    turn.content.map((b: any) => [b.id, b.toolset_name]),
+    [
+      ["toolu_named", "computer"],
+      ["toolu_plain", undefined],
+      ["toolu_number", undefined],
+      ["toolu_bare", undefined],
+      ["toolu_other", undefined],
+    ],
+  );
+  assert.deepEqual(
+    results.content.map((b: any) => [b.tool_use_id, b.toolset_name]),
+    turn.content.map((b: any) => [b.id, b.toolset_name]),
+  );
+  // Nothing else of a call's details is sent.
+  assert.deepEqual(Object.keys(turn.content[0]).sort(), ["id", "input", "name", "toolset_name", "type"]);
+});
+
+test("a result finds its call's toolset when the id was made acceptable, and when the result was filled in on the way out", async () => {
+  const sent: any[] = [];
+  const messages: AnthropicMessage[] = [
+    user("go"),
+    {
+      from: "model",
+      end: "stop",
+      content: [
+        member("browser", "scroll", "call:9f3a.1"),
+        // Never answered.
+        member("browser", "wait", "toolu_unanswered"),
+      ],
+    },
+    {
+      from: "tool",
+      content: [{ type: "tool_result", id: "call:9f3a.1", content: [{ type: "text", text: "OK" }] }],
+    },
+  ];
+  await collect(
+    anthropic(client(sent, says("ok")))({ messages, settings: withTools(browser) }),
+  );
+  const [, turn, results] = sent[0].messages;
+  assert.deepEqual(
+    turn.content.map((b: any) => [b.id, b.toolset_name]),
+    [
+      ["toolu_fitted_0", "browser"],
+      ["toolu_unanswered", "browser"],
+    ],
+  );
+  assert.deepEqual(results.content, [
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_fitted_0",
+      toolset_name: "browser",
+      content: [{ type: "text", text: "OK" }],
+    },
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_unanswered",
+      toolset_name: "browser",
+      is_error: true,
+      content: [{ type: "text", text: "Not run: this call was never given a result." }],
+    },
+  ]);
+});
+
+test("the browser's state goes in a result's settings: sent after the result's other parts, and alone where there are none", async () => {
+  const sent: any[] = [];
+  const navigate = member("browser", "navigate", "toolu_1", { url: "example.com" });
+  const listTabs = member("browser", "list_tabs", "toolu_2");
+  const newTab = member("browser", "new_tab", "toolu_3");
+  const opened = { tabs, state_changes: [{ type: "tab_opened" as const, tab_id: "t2" }] };
+  const messages: AnthropicMessage[] = [
+    user("go to example.com, then say which tabs are open"),
+    { from: "model", end: "stop", content: [navigate, listTabs, newTab] },
+    {
+      from: "tool",
+      content: [
+        // Text and the state: the state comes last.
+        { ...toolResult(navigate, "Navigated."), settings: { anthropic: { browser_state: { tabs } } } },
+        // The state is all Anthropic takes for this member, so the content is empty.
+        { ...toolResult(listTabs, []), settings: { anthropic: { browser_state: { tabs } } } },
+        // Beside a cache breakpoint, and another provider's entry, which is not sent.
+        {
+          ...toolResult(newTab, []),
+          settings: {
+            anthropic: { browser_state: opened, cache_control: { type: "ephemeral" } },
+            other: { browser_state: { tabs: [] } },
+          },
+        },
+      ],
+    },
+  ];
+  await collect(
+    anthropic(client(sent, says("Two tabs.")))({ messages, settings: withTools(browser) }),
+  );
+  assert.deepEqual(sent[0].messages[2].content, [
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_1",
+      toolset_name: "browser",
+      content: [
+        { type: "text", text: "Navigated." },
+        { type: "browser_state", tabs },
+      ],
+    },
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_2",
+      toolset_name: "browser",
+      content: [{ type: "browser_state", tabs }],
+    },
+    {
+      type: "tool_result",
+      tool_use_id: "toolu_3",
+      toolset_name: "browser",
+      content: [{ type: "browser_state", ...opened }],
+      cache_control: { type: "ephemeral" },
+    },
+  ]);
+});
+
+test("what the browser's state is cannot be set among its fields, and a result with no state is sent as before", async () => {
+  const sent: any[] = [];
+  const click = member("browser", "left_click", "toolu_1");
+  const stored: any[] = [
+    user("go"),
+    { from: "model", end: "stop", content: [click, { ...click, id: "toolu_2" }] },
+    {
+      from: "tool",
+      content: [
+        { ...toolResult(click, "OK"), settings: { anthropic: { browser_state: { tabs, type: "text" } } } },
+        toolResult({ ...click, id: "toolu_2" }, "OK"),
+      ],
+    },
+  ];
+  await collect(
+    anthropic(client(sent, says("ok")))({ messages: stored, settings: withTools(browser) }),
+  );
+  assert.deepEqual(
+    sent[0].messages[2].content.map((b: any) => b.content),
+    [
+      [
+        { type: "text", text: "OK" },
+        { type: "browser_state", tabs },
+      ],
+      [{ type: "text", text: "OK" }],
+    ],
+  );
+});
+
 // Must not compile: a provider-specific part with no provider name on it.
 export const illegal = (
   claude: ReturnType<typeof claudeWith>,
@@ -2392,6 +2676,30 @@ export const illegal = (
         from: "user",
         // @ts-expect-error and nothing else may ride in the entry
         content: [{ type: "text", text: "hi", settings: { anthropic: { temperature: 0 } } }],
+      },
+    ],
+  });
+  claude({
+    messages: [
+      {
+        from: "model",
+        content: [
+          // @ts-expect-error a toolset's name is a string
+          { type: "tool_call", id: "a", name: "screenshot", input: {}, details: { anthropic: { toolset_name: 5 } } },
+        ],
+      },
+    ],
+  });
+  claude({
+    messages: [
+      {
+        from: "tool",
+        content: [
+          // @ts-expect-error the browser's state is the SDK's own block: its tabs have to be there
+          { type: "tool_result", id: "a", content: [], settings: { anthropic: { browser_state: {} } } },
+          // @ts-expect-error and what the block is cannot be set among its fields
+          { type: "tool_result", id: "a", content: [], settings: { anthropic: { browser_state: { tabs: [], type: "browser_state" } } } },
+        ],
       },
     ],
   });
