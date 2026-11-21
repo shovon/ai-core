@@ -1,6 +1,6 @@
 {
   "name": "@ai-patterns/anthropic-provider",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Anthropic's API as a provider for @ai-patterns/core: the vendor's API behind the library's one port. The SDK is yours to install.",
   "license": "MIT",
   "repository": {
