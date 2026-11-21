@@ -37,10 +37,12 @@ import {
   type ReasoningPart,
   type Reply,
   type Request,
+  type ShapeSpec,
   type SourcePart,
   type TextPart,
   type ToolCall,
   type ToolInputPart,
+  type ToolMessage,
   type ToolResult,
   type ToolSpec,
   type UserMessage,
@@ -403,6 +405,60 @@ test("what an End carries is for reading: collect() keeps it, and text() and tot
     cacheWrite: 0,
     reasoning: 0,
   });
+});
+
+test("what pieces carry for providers joins with them: the entries of both, and for one provider the later piece's", () => {
+  const empty: Reply<TextPart | ToolInputPart | ToolCall> = [];
+  const fold = (...chunks: (TextPart | ToolInputPart | ToolCall | End)[]) =>
+    chunks.reduce(append<TextPart | ToolInputPart | ToolCall>, empty);
+  const signed = { acme: { signature: "s1" } };
+
+  // A provider may put its entry on any piece, the last included: however the
+  // part is cut, the turn comes out as if it had arrived whole.
+  const whole = fold({ type: "text", text: "Blue.", details: signed }, stop);
+  assert.deepEqual(
+    fold({ type: "text", text: "Bl", details: signed }, say("ue."), stop),
+    whole,
+  );
+  assert.deepEqual(
+    fold(say("Bl"), { type: "text", text: "ue.", details: signed }, stop),
+    whole,
+  );
+
+  // Entries for different providers are both kept. For one provider, the
+  // later piece's takes the place of the earlier one's.
+  const [mixed] = fold(
+    {
+      type: "text",
+      text: "a",
+      settings: { acme: { n: 1 } },
+      details: { acme: { v: 1 }, other: { kept: true } },
+    },
+    { type: "text", text: "b", details: { acme: { v: 2 } } },
+    stop,
+  );
+  assert.deepEqual(mixed?.content, [
+    {
+      type: "text",
+      text: "ab",
+      settings: { acme: { n: 1 } },
+      details: { acme: { v: 2 }, other: { kept: true } },
+    },
+  ]);
+
+  // Pieces that carry nothing gain nothing.
+  assert.deepEqual(fold(say("a"), say("b"), stop)[0]?.content, [say("ab")]);
+
+  // A call carries its own, and nothing of what the pieces of its input did.
+  const [called] = fold(
+    { type: "tool_input", id: "1", name: "t", text: "{", details: signed },
+    { type: "tool_input", id: "1", name: "t", text: "}" },
+    { type: "tool_call", id: "1", name: "t", input: {}, details: { acme: { v: 3 } } },
+    stop,
+  );
+  assert.deepEqual(called?.content, [
+    { type: "tool_call", id: "1", name: "t", input: {}, details: { acme: { v: 3 } } },
+  ]);
 });
 
 test("reasoning arrives in pieces and joins as text does, and the two never join each other", () => {
@@ -1936,30 +1992,33 @@ export const illegal = async (
   textOnly({ messages: [{ from: "tool", content: [answer] }] });
 };
 
-// Where a vendor's own may go on a part, a tool and what closes a turn, and
-// where it may not: in `settings` or in `details`, under the vendor's name,
-// never beside the fields the library names.
+// Where a vendor's own may go, and where it may not: in `settings` or in
+// `details`, under the vendor's name, never beside the fields the library
+// names. Every part, every message, what closes a turn, a tool and a shape
+// takes both: the library does not guess which of them a vendor has something for.
 export const vendorsOwn = () => {
-  const hinted: TextPart = {
-    type: "text",
-    text: "hi",
+  const own = {
     settings: { anyone: { any: "thing" } },
-  };
-  const tool: ToolSpec = {
-    name: "t",
-    description: "A tool.",
-    schema: { type: "object" },
-    settings: { anyone: { any: "thing" } },
-  };
-  const cited: SourcePart = {
-    type: "source",
     details: { anyone: { any: "thing" } },
   };
-  const ended: End = {
-    type: "end",
-    reason: "stop",
-    details: { anyone: { any: "thing" } },
-  };
+  const said: TextPart = { type: "text", text: "hi", ...own };
+  const thought: ReasoningPart = { type: "reasoning", text: "hm", ...own };
+  const given: FilePart = { type: "file", mediaType: "image/png", data: "", ...own };
+  const called: ToolCall = { type: "tool_call", id: "1", name: "t", input: {}, ...own };
+  const writing: ToolInputPart = { type: "tool_input", id: "1", name: "t", text: "", ...own };
+  const cited: SourcePart = { type: "source", ...own };
+  const result: ToolResult = { type: "tool_result", id: "1", content: [], ...own };
+  const theirs: NativePart = { type: "native", provider: "anyone", value: 1, ...own };
+  const ended: End = { type: "end", reason: "stop", ...own };
+  const asked: UserMessage<TextPart> = { from: "user", content: [said], ...own };
+  const turn: ModelMessage<TextPart> = { from: "model", content: [said], ...own };
+  const answered: ToolMessage = { from: "tool", content: [result], ...own };
+  const tool: ToolSpec = { name: "t", description: "A tool.", schema: {}, ...own };
+  const shape: ShapeSpec = { schema: {}, ...own };
+  // Any of them is still a part, or a message, to code that knows no more.
+  const parts: Part[] = [said, thought, given, called, writing, cited, result, theirs];
+  const messages: AnyMessage[] = [asked, turn, answered];
+
   const bare: TextPart = {
     type: "text",
     text: "hi",
@@ -1979,7 +2038,9 @@ export const vendorsOwn = () => {
     // @ts-expect-error a vendor's settings for a tool go in `settings`, never beside the tool's own fields
     anyone: { any: "thing" },
   };
-  return [hinted, tool, cited, ended, bare, loose, named];
+  // @ts-expect-error both fields hold entries by provider, never a bare value
+  const flat: TextPart = { type: "text", text: "hi", details: "from anyone" };
+  return [parts, messages, ended, tool, shape, bare, loose, named, flat];
 };
 
 // Where a vendor's settings may go on a request, and where they may not.

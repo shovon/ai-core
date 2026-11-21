@@ -5,10 +5,12 @@
 
 What only one provider understands now sits in one of two declared fields, under the provider's name. It is no longer a bare field named after the provider.
 
-- `settings` holds what is addressed to a provider. A text part, a file, a tool call, a tool result and a tool may carry it, as a request already did.
-- `details` holds what a provider said. A source, the `end` chunk and the model turn made from it may carry it.
+- `settings` holds what is addressed to a provider, as it already did on a request.
+- `details` holds what a provider said.
 
-`ByProvider` is new in the core: the type of both fields.
+Every part, every message, a tool, a shape and the `end` chunk may carry both, so a provider needs nothing added to the core to use either on any of them. `ByProvider` is new in the core: the type of both fields.
+
+Pieces of text, reasoning and tool input now join what they carry in the two fields as well as their text: the entries of both pieces, and for one provider the later piece's.
 
 This breaks code and stored histories that use the bare field. With Anthropic:
 

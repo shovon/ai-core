@@ -2,20 +2,25 @@
 
 // ── Parts: the least a workflow and a UI have to agree on ───────────────────
 
-export type Part = { readonly type: string }; // every part is a subtype of this
 /**
  * What only one provider understands, each under that provider's name. A value
  * of this library holds it in one of two fields, and nowhere else:
- * - `settings` is addressed to a provider: that vendor's own settings for a
- *   part, a tool or a request.
- * - `details` is what a provider said: whatever else it knows of a response
- *   or of a source.
+ * - `settings` is addressed to a provider: that vendor's own settings for the
+ *   value, such as a caching hint on a part or a tool's strictness.
+ * - `details` is what a provider said of the value: whatever else it knows of
+ *   a response, a source or a call.
  *
  * A provider reads the entry under its own name and ignores every other. So
  * no type here takes a vendor's field beside its own fields.
  */
 export type ByProvider = { readonly [provider: string]: unknown };
-export type TextPart = { type: "text"; text: string; settings?: ByProvider };
+// Every part, every message, what closes a turn, a tool and a shape may carry
+// both fields. The library does not say which of them a vendor will ever have
+// something for: which entries a provider reads, and where, is its own to say.
+type Open = { settings?: ByProvider; details?: ByProvider };
+
+export type Part = Open & { readonly type: string }; // every part is a subtype of this
+export type TextPart = Open & { type: "text"; text: string };
 /**
  * What the model says of its own working, as it works. It is for showing,
  * never for sending: what a provider needs back to continue a turn travels as
@@ -24,7 +29,7 @@ export type TextPart = { type: "text"; text: string; settings?: ByProvider };
  *
  * One with no text yet says only that the model has started working.
  */
-export type ReasoningPart = { type: "reasoning"; text: string };
+export type ReasoningPart = Open & { type: "reasoning"; text: string };
 /**
  * A file, inline or by link. `data` is the bytes in standard base64 (RFC 4648,
  * with padding); `url` is where to fetch them. Both are strings, so a file
@@ -33,15 +38,16 @@ export type ReasoningPart = { type: "reasoning"; text: string };
  * It may be given to a model, come back from a tool, or be made by a model. A
  * provider whose model makes one emits it whole.
  */
-export type FilePart =
-  | { type: "file"; mediaType: string; data: string; settings?: ByProvider }
-  | { type: "file"; mediaType: string; url: string; settings?: ByProvider };
-export type ToolCall = {
+export type FilePart = Open &
+  (
+    | { type: "file"; mediaType: string; data: string }
+    | { type: "file"; mediaType: string; url: string }
+  );
+export type ToolCall = Open & {
   type: "tool_call";
   id: string;
   name: string;
   input: unknown;
-  settings?: ByProvider;
 };
 /**
  * The input of a tool call as the model writes it: its JSON text, in pieces.
@@ -54,7 +60,7 @@ export type ToolCall = {
  * only that the model has started writing the call. The text so far is a
  * beginning of JSON, and need not be JSON itself.
  */
-export type ToolInputPart = {
+export type ToolInputPart = Open & {
   type: "tool_input";
   id: string;
   name: string;
@@ -75,26 +81,24 @@ export type ToolInputPart = {
  * the provider's name. A provider sends its own sources back with the text, if
  * its API takes them, and leaves out everyone else's.
  */
-export type SourcePart = {
+export type SourcePart = Open & {
   type: "source";
   span?: number;
   quote?: string;
   title?: string;
   url?: string;
-  details?: ByProvider;
 };
-export type ToolResult = {
+export type ToolResult = Open & {
   type: "tool_result";
   id: string;
   content: readonly (TextPart | FilePart)[];
   error?: boolean;
-  settings?: ByProvider;
 };
 /**
  * Something only one provider understands, such as its reasoning state. It
  * carries that provider's name, so every other provider can tell it apart.
  */
-export type NativePart<Name extends string = string, Value = unknown> = {
+export type NativePart<Name extends string = string, Value = unknown> = Open & {
   type: "native";
   provider: Name;
   value: Value;
@@ -135,13 +139,12 @@ export type Usage = {
  * provider says of the response. `append` keeps all of this on the turn, so a
  * stored history holds it too. None of it is ever sent.
  */
-export type End = {
+export type End = Open & {
   type: "end";
   reason: Reason;
   usage?: Usage;
   id?: string;
   model?: string;
-  details?: ByProvider;
 };
 
 // ── History: who a message is from decides what it may contain ──────────────
@@ -154,7 +157,7 @@ export type End = {
 // The shape grows only by adding fields and part types. A reader skips fields
 // it does not know and rejects part types it does not know.
 
-export type UserMessage<P extends Part> = {
+export type UserMessage<P extends Part> = Open & {
   from: "user";
   content: readonly P[];
 };
@@ -168,16 +171,18 @@ export type UserMessage<P extends Part> = {
  * is what the provider said of the response, under the provider's name. A
  * provider reads only `content` when it sends a turn.
  */
-export type ModelMessage<P extends Part> = {
+export type ModelMessage<P extends Part> = Open & {
   from: "model";
   content: readonly P[];
   end?: Reason;
   usage?: Usage;
   id?: string;
   model?: string;
-  details?: ByProvider;
 };
-export type ToolMessage = { from: "tool"; content: readonly ToolResult[] };
+export type ToolMessage = Open & {
+  from: "tool";
+  content: readonly ToolResult[];
+};
 
 export type Message<User extends Part, Model extends Part> =
   | UserMessage<User>
@@ -220,14 +225,13 @@ export type Reply<Out extends Part> = readonly (
  * provider's name, that provider's own settings for the tool. Every other
  * provider ignores the entry and is told the same tool.
  */
-export type ToolSpec = {
+export type ToolSpec = Open & {
   name: string;
   description: string;
   schema: object;
-  settings?: ByProvider;
 };
 /** What an answer must be: JSON that fits this schema. `parse` checks one, once it is read as JSON. */
-export type ShapeSpec = { schema: object };
+export type ShapeSpec = Open & { schema: object };
 export type Request<
   M extends AnyMessage,
   S extends TextPart = TextPart,
@@ -408,6 +412,28 @@ const inPieces = (
 // The call a piece belongs to; text and reasoning belong to none.
 const callOf = (part: Part) => (isToolInput(part) ? part.id : undefined);
 
+// What two pieces carry for providers, as one: the entries of both, and where
+// both have one for the same provider, the later piece's.
+const both = (first?: ByProvider, second?: ByProvider) =>
+  first && second ? { ...first, ...second } : (second ?? first);
+
+// Two pieces of one part, as one: the text of both, and what both carry for
+// providers. So a provider may put its entry on any piece, the last included,
+// and the part comes out the same as if it had arrived whole.
+const joined = <P extends TextPart | ReasoningPart | ToolInputPart>(
+  first: P,
+  second: P,
+): P => {
+  const settings = both(first.settings, second.settings);
+  const details = both(first.details, second.details);
+  return {
+    ...first,
+    text: first.text + second.text,
+    ...(settings && { settings }),
+    ...(details && { details }),
+  };
+};
+
 /**
  * How one more part is added to the parts of a turn still arriving: joined to
  * what is there, or put after it. That is all it means for a kind of part to
@@ -433,6 +459,11 @@ export type Join<P extends Part> = (
  * reasoning; tool input joins the input of the same call. A tool call takes
  * the place of the tool input directly before it, when that is its own. Every
  * other part is put after the rest, whole.
+ *
+ * What pieces carry for providers joins with them: the joined part has the
+ * `settings` and `details` of both, and where both have an entry for one
+ * provider, the later piece's. A call carries its own, and nothing of what
+ * the pieces of its input did.
  */
 export const join = <P extends Part>(
   parts: readonly P[],
@@ -448,7 +479,7 @@ export const join = <P extends Part>(
     inPieces(part) &&
     last.type === part.type &&
     callOf(last) === callOf(part)
-    ? [...before, { ...last, text: last.text + part.text }]
+    ? [...before, joined(last, part)]
     : [...parts, part];
 };
 

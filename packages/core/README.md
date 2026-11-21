@@ -654,7 +654,9 @@ For a real one:
 - A history may hold `tool_input` parts whose call never arrived. Leave them out of what you send, as you do reasoning.
 - If your model says where its words came from, yield a `source` part directly after the text it supports, whole, with a `span`: the length of that text as you yielded it. Put what only your API knows of it in its `details`, under your provider's name. Send your own sources back if your API takes them, and leave out everyone else's.
 - A file may carry your API's own settings for it, in its `settings` under your provider's name. Read them on a file in a message, not on one inside a tool result.
-- What else only your API understands sits in one of two fields, under your provider's name, and nowhere else. `settings` is for what is addressed to you, on a part, a tool or a request. `details` is for what you say, of a response or of a source. Put no field of your own beside the library's.
+- What else only your API understands sits in one of two fields, under your provider's name, and nowhere else. `settings` is for what is addressed to you, and `details` is for what you say. Put no field of your own beside the library's.
+  - Every part, every message, a tool, a shape and an `end` may carry both. Which of them you read, and where, is yours to say: the library does not guess.
+  - On a part you yield in pieces, put your entry on any piece, the last included. The pieces' entries are joined with their text, and a later piece's entry takes the place of an earlier one's.
 - Anything only your API understands that is a part of its own travels as a `native` part carrying your provider's name. Send your own native parts back and leave out everyone else's, so one history can pass between providers.
 - Close each turn with an `end` chunk. Besides the reason and usage, say the response's `id` and `model` if your API gives them, and put whatever else it says of the response in the end's `details`, under your provider's name. Keep it plain JSON, with nothing undefined in it, and leave the content out. `append` keeps all of it on the turn.
 - Build what you send from the fields you know. Never forward a part whole.

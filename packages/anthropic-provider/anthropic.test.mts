@@ -2376,10 +2376,10 @@ export const illegal = (
       {
         from: "user",
         content: [
+          // @ts-expect-error a hint has to be one Anthropic defines
           {
             type: "text",
             text: "hi",
-            // @ts-expect-error a hint has to be one Anthropic defines
             settings: { anthropic: { cache_control: { type: "forever" } } },
           },
         ],
