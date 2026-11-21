@@ -1,6 +1,6 @@
 # @ai-patterns/anthropic-provider
 
-Anthropic's API as a provider for [`@ai-patterns/core`](https://github.com/shovon/ai-core/blob/main/packages/core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it.
+Anthropic's API as a provider for [`@ai-patterns/core`](https://github.com/shovon/ai-core/blob/main/packages/core/README.md). Anthropic's SDK is yours to install, and the provider is made with a client from it: Anthropic's own, or one for [Bedrock, Vertex AI or Foundry](#claude-on-bedrock-vertex-ai-or-foundry).
 
 ```sh
 npm install @ai-patterns/core @ai-patterns/anthropic-provider @anthropic-ai/sdk
@@ -14,6 +14,32 @@ const claude = anthropic(new Anthropic());
 ```
 
 How to use it is in the library's README, for now: [settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#settings), [files](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#files), [sources](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#sources), [caching](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#caching-with-anthropic), [tool settings](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#tool-settings-for-anthropic) and [Anthropic's own tools](https://github.com/shovon/ai-core/blob/main/packages/core/README.md#anthropics-own-tools). What follows is said only here.
+
+## Claude on Bedrock, Vertex AI or Foundry
+
+The provider asks a client for one thing: the call it makes, `client.beta.messages.stream`. So it takes Anthropic's client, and each client Anthropic's SDKs make for a cloud:
+
+| Client | Package |
+|---|---|
+| `Anthropic` | `@anthropic-ai/sdk` |
+| `AnthropicBedrock`, `AnthropicBedrockMantle` | `@anthropic-ai/bedrock-sdk` |
+| `AnthropicVertex` | `@anthropic-ai/vertex-sdk` |
+| `AnthropicFoundry` | `@anthropic-ai/foundry-sdk` |
+
+```ts
+import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
+import { anthropic } from "@ai-patterns/anthropic-provider";
+
+const claude = anthropic(new AnthropicBedrock());
+```
+
+- The cloud's SDK is yours to install, beside `@anthropic-ai/sdk`. How a client signs in is that SDK's business.
+- Everything else is as it is with Anthropic's client. The settings are addressed to `anthropic`, and what comes back goes by that name: the model and its blocks are Anthropic's on every cloud.
+- A model goes by the name its cloud gives it, in `settings.anthropic.model`.
+- A cloud may not answer every beta or tool that Anthropic's API does. The provider sends what the request says, and the cloud reports what it does not take.
+- The type is exported as `AnthropicClient`, for a provider of your own. Anything with that one call is one, such as a client of yours that wraps the SDK's.
+
+Each client was checked with its `fetch` replaced: the request goes to that cloud's address, and the reply is read whole. None was run against a live cloud. Whether one cloud takes a history that another made was not tried.
 
 ## Betas
 
@@ -219,9 +245,9 @@ A timeout, a header and retries are the SDK's own options for one request. They 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 import { text, user, type Takes } from "@ai-patterns/core";
-import { params, read, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+import { params, read, type AnthropicClient, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
-const withOptions = (client: Anthropic, options: Anthropic.RequestOptions): Takes<AnthropicRequest, AnthropicOut> =>
+const withOptions = (client: AnthropicClient, options: Anthropic.RequestOptions): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
     yield* read(client.beta.messages.stream(params(request), { ...options, signal: request.signal }));
   };
@@ -243,6 +269,7 @@ const title = await text(
 
 - The options are the SDK's own type: `headers`, `timeout`, `maxRetries`, `idempotencyKey` and the rest. One the SDK adds later needs nothing but a newer SDK.
 - One client serves every provider made this way, and `anthropic(client)` beside them. Different options never need a second client.
+- The client may be any the provider takes, a cloud's among them.
 - They are not on the request, so a request stays plain data even where an option is not, such as `middleware`, which holds functions.
 - Cancelling is the request's own. Its `signal` comes after the options, so a `signal` among them is not used.
 - It is a provider like the one it is made from. It fits wherever `anthropic(client)` does, and sends nothing until its stream is first read.
@@ -255,12 +282,12 @@ To say the options request by request, make a provider whose request carries the
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 import { text, user, type Takes } from "@ai-patterns/core";
-import { params, read, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+import { params, read, type AnthropicClient, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
 // A request for Anthropic, with the SDK's options for it beside the rest.
 type RequestWithOptions = AnthropicRequest & { options?: Anthropic.RequestOptions };
 
-const takingOptions = (client: Anthropic): Takes<RequestWithOptions, AnthropicOut> =>
+const takingOptions = (client: AnthropicClient): Takes<RequestWithOptions, AnthropicOut> =>
   async function* (request) {
     yield* read(client.beta.messages.stream(params(request), { ...request.options, signal: request.signal }));
   };
@@ -291,13 +318,13 @@ The provider does not keep a response's headers. A provider of your own that doe
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
 import { isEnd, type Takes } from "@ai-patterns/core";
-import { params, read, type AnthropicMessage, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
+import { params, read, type AnthropicClient, type AnthropicMessage, type AnthropicOut, type AnthropicRequest } from "@ai-patterns/anthropic-provider";
 
 // Which headers are kept is yours to say. Here: what Anthropic says of the rate limits.
 const rateLimits = (headers: Headers | undefined) =>
   Object.fromEntries([...(headers ?? [])].filter(([name]) => name.startsWith("anthropic-ratelimit-")));
 
-const keepingHeaders = (client: Anthropic): Takes<AnthropicRequest, AnthropicOut> =>
+const keepingHeaders = (client: AnthropicClient): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
     const stream = client.beta.messages.stream(params(request), { signal: request.signal });
     for await (const chunk of read(stream))

@@ -914,6 +914,17 @@ export const read = async function* (
 };
 
 /**
+ * What the provider needs of a client: the one call it makes, as the SDK types
+ * it. Anthropic's own client is one, and so are the SDK's clients for Bedrock,
+ * Vertex AI and Foundry, which lack other things an `Anthropic` has.
+ */
+export type AnthropicClient = {
+  readonly beta: {
+    readonly messages: Pick<Anthropic["beta"]["messages"], "stream">;
+  };
+};
+
+/**
  * Anthropic's API behind the library's one port. It is made with a client and
  * nothing else: which model answers, and how, is said by each request.
  *
@@ -922,7 +933,7 @@ export const read = async function* (
  * first read, which is why it is a generator and not the two put end to end.
  */
 export const anthropic = (
-  client: Anthropic,
+  client: AnthropicClient,
 ): Takes<AnthropicRequest, AnthropicOut> =>
   async function* (request) {
     yield* read(
